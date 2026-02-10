@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles for Svelte Flow */
+.svelte-flow {
+  @apply w-full h-full;
+}
+
+.svelte-flow__node {
+  @apply cursor-pointer;
+}
+
+.svelte-flow__edge {
+  @apply cursor-pointer;
+}
+
+/* Allow interaction with edge label popups (e.g., relation details) */
+.svelte-flow__edgelabel-renderer {
+  pointer-events: all !important;
+}
+
+/* Larger connection handles for easier edge creation */
+.handle-hit {
+  position: relative;
+}
+
+.handle-hit::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: transparent;
+  pointer-events: all;
+}
