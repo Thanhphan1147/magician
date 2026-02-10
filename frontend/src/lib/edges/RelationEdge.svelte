@@ -47,45 +47,20 @@
   );
 
   // Calculate edge path
-  let edgeOffset = $derived(() => {
-    const edgeIndex = data?.edgeIndex ?? 0;
-    const edgeCount = data?.edgeCount ?? 1;
-    const spacing = 18;
-
-    return (edgeIndex - (edgeCount - 1) / 2) * spacing;
-  });
-
-  let offsetCoords = $derived(() => {
-    const dx = targetX - sourceX;
-    const dy = targetY - sourceY;
-    const length = Math.hypot(dx, dy) || 1;
-    const offsetX = (-dy / length) * edgeOffset;
-    const offsetY = (dx / length) * edgeOffset;
-
-    return {
-      sourceX: sourceX + offsetX,
-      sourceY: sourceY + offsetY,
-      targetX: targetX + offsetX,
-      targetY: targetY + offsetY,
-      offsetX,
-      offsetY
-    };
-  });
-
   let edgePath = $derived(
     getBezierPath({
-      sourceX: offsetCoords.sourceX,
-      sourceY: offsetCoords.sourceY,
+      sourceX,
+      sourceY,
       sourcePosition,
-      targetX: offsetCoords.targetX,
-      targetY: offsetCoords.targetY,
+      targetX,
+      targetY,
       targetPosition
     })
   );
 
   // Calculate label position (top-left offset from middle of edge)
-  let labelX = $derived((sourceX + targetX) / 2 - 120 + offsetCoords.offsetX);
-  let labelY = $derived((sourceY + targetY) / 2 - 80 + offsetCoords.offsetY);
+  let labelX = $derived((sourceX + targetX) / 2 - 120);
+  let labelY = $derived((sourceY + targetY) / 2 - 80);
 
   // Get endpoint information
   let providerApp = $derived(data?.providerApp || 'unknown');
