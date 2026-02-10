@@ -3,6 +3,7 @@
   import { writable } from 'svelte/store';
   import CharmNode from './lib/nodes/CharmNode.svelte';
   import ModelFrame from './lib/nodes/ModelFrame.svelte';
+  import MachineNode from './lib/nodes/MachineNode.svelte';
   import RelationEdge from './lib/edges/RelationEdge.svelte';
   import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig } from './lib/api.js';
   import '@xyflow/svelte/dist/style.css';
@@ -10,7 +11,8 @@
   // Define custom node and edge types
   const nodeTypes = {
     charmNode: CharmNode,
-    modelFrame: ModelFrame
+    modelFrame: ModelFrame,
+    machineNode: MachineNode
   };
 
   const edgeTypes = {
@@ -48,7 +50,9 @@
       position: { x: 100, y: 50 },
       data: { 
         modelName: selectedModel,
-        onRefreshSuccess: handleModelRefresh
+        onRefreshSuccess: handleModelRefresh,
+        onViewModeChange: handleViewModeChange,
+        viewMode: 'app'
       },
       style: 'width: 800px; height: 600px; z-index: 0;'
     }
@@ -303,14 +307,14 @@
         );
 
         if (existingEdge) {
-          return currentEdges.map(edge =>
+          return applyEdgeGrouping(currentEdges.map(edge =>
             edge.id === existingEdge.id
               ? { ...edge, data: { ...edge.data, isRelated: true } }
               : edge
-          );
+          ));
         }
 
-        return [
+        return applyEdgeGrouping([
           ...currentEdges,
           {
             id: `edge-${edgeIdCounter++}`,
@@ -324,7 +328,7 @@
               isRelated: true
             }
           }
-        ];
+        ]);
       });
 
       showNotification('success', `Relation created: ${endpointA} ↔ ${endpointB}`);
@@ -646,8 +650,92 @@
     );
   }
 
+  function applyEdgeGrouping(edgeList) {
+    const relationGroups = new Map();
+
+    edgeList.forEach(edge => {
+      if (edge.type !== 'relationEdge') {
+        return;
+      }
+
+      const key = [edge.source, edge.target].sort().join('::');
+      if (!relationGroups.has(key)) {
+        relationGroups.set(key, []);
+      }
+
+      relationGroups.get(key).push(edge.id);
+    });
+
+    relationGroups.forEach((ids, key) => {
+      relationGroups.set(key, ids.sort());
+    });
+
+    return edgeList.map(edge => {
+      if (edge.type !== 'relationEdge') {
+        return edge;
+      }
+
+      const key = [edge.source, edge.target].sort().join('::');
+      const ids = relationGroups.get(key) || [];
+      const multiIndex = Math.max(ids.indexOf(edge.id), 0);
+      const multiCount = Math.max(ids.length, 1);
+
+      return {
+        ...edge,
+        data: {
+          ...edge.data,
+          multiIndex,
+          multiCount
+        }
+      };
+    });
+  }
+
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function handleViewModeChange(modelId, viewMode) {
+    const resolvedView = viewMode === 'machine' ? 'machine' : 'app';
+
+    nodes.update(currentNodes =>
+      currentNodes.map(node => {
+        if (node.id === modelId) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              viewMode: resolvedView
+            }
+          };
+        }
+
+        const parentId = node.parentId ?? node.parentNode;
+        if (parentId === modelId) {
+          if (node.type === 'charmNode') {
+            return { ...node, hidden: resolvedView !== 'app' };
+          }
+          if (node.type === 'machineNode') {
+            return { ...node, hidden: resolvedView !== 'machine' };
+          }
+        }
+
+        return node;
+      })
+    );
+
+    edges.update(currentEdges =>
+      currentEdges.map(edge =>
+        edge.type === 'relationEdge'
+          ? { ...edge, hidden: resolvedView !== 'app' }
+          : edge
+      )
+    );
+
+    if (resolvedView === 'machine') {
+      selectedEdgeId = null;
+      selectedNodeId = null;
+    }
   }
 
   function handleModelRefresh(modelId, status) {
@@ -656,10 +744,11 @@
       // Find the model frame node to position apps near it
       const modelFrame = $nodes.find(n => n.id === modelId);
       const modelName = modelFrame?.data?.modelName || 'default';
+      const viewMode = modelFrame?.data?.viewMode || 'app';
       
       // Get all existing charm nodes in this model to preserve their positions
       const existingCharmNodes = $nodes.filter(n => 
-        n.type === 'charmNode' && n.parentId === modelId
+        n.type === 'charmNode' && (n.parentId ?? n.parentNode) === modelId
       );
       
       // Helper function to check if a position overlaps with existing nodes
@@ -814,7 +903,8 @@
             },
             parentId: modelId,
             extent: 'parent',
-            style: 'z-index: 10;'
+            style: 'z-index: 10;',
+            hidden: viewMode !== 'app'
           };
           
           nodes.update(n => [...n, newNode]);
@@ -834,7 +924,8 @@
                   charm: appData['charm-name'] || appData.charm || appName,
                   channel: appData['charm-channel'] || '',
                   config: appConfig
-                }
+                },
+                hidden: viewMode !== 'app'
               };
             }
             return node;
@@ -843,14 +934,132 @@
       });
     }
 
+    if (status?.applications || status?.machines) {
+      const modelFrame = $nodes.find(n => n.id === modelId);
+      const viewMode = modelFrame?.data?.viewMode || 'app';
+
+      const machineUnits = new Map();
+
+      if (status?.applications) {
+        Object.entries(status.applications).forEach(([appName, appData]) => {
+          if (!appData?.units) {
+            return;
+          }
+
+          Object.entries(appData.units).forEach(([unitName, unitData]) => {
+            const machineId = unitData?.machine ?? unitData?.['machine-id'];
+            if (machineId === undefined || machineId === null) {
+              return;
+            }
+            const machineKey = String(machineId);
+            if (!machineUnits.has(machineKey)) {
+              machineUnits.set(machineKey, []);
+            }
+            machineUnits.get(machineKey).push(unitName || `${appName}`);
+          });
+        });
+      }
+
+      if (status?.machines) {
+        Object.keys(status.machines).forEach(machineId => {
+          if (!machineUnits.has(machineId)) {
+            machineUnits.set(machineId, []);
+          }
+        });
+      }
+
+      const machineIds = new Set(machineUnits.keys());
+      const existingMachineNodes = $nodes.filter(n =>
+        n.type === 'machineNode' && (n.parentId ?? n.parentNode) === modelId
+      );
+
+      const MACHINE_NODE_WIDTH = 240;
+      const MACHINE_NODE_HEIGHT = 140;
+      const MACHINE_SPACING_X = 40;
+      const MACHINE_SPACING_Y = 40;
+      let machineX = 40;
+      let machineY = 80;
+      const machinesPerRow = 3;
+
+      const positionByMachine = new Map();
+      Array.from(machineUnits.keys()).sort().forEach((machineId, index) => {
+        positionByMachine.set(machineId, { x: machineX, y: machineY });
+        machineX += MACHINE_NODE_WIDTH + MACHINE_SPACING_X;
+        if ((index + 1) % machinesPerRow === 0) {
+          machineX = 40;
+          machineY += MACHINE_NODE_HEIGHT + MACHINE_SPACING_Y;
+        }
+      });
+
+      nodes.update(currentNodes => {
+        const filteredNodes = currentNodes.filter(node => {
+          if (node.type !== 'machineNode') {
+            return true;
+          }
+          const parentId = node.parentId ?? node.parentNode;
+          if (parentId !== modelId) {
+            return true;
+          }
+          return machineIds.has(String(node.data?.machineId));
+        });
+
+        const updatedNodes = filteredNodes.map(node => {
+          if (node.type !== 'machineNode') {
+            return node;
+          }
+          const parentId = node.parentId ?? node.parentNode;
+          if (parentId !== modelId) {
+            return node;
+          }
+          const machineId = String(node.data?.machineId ?? '');
+          const units = machineUnits.get(machineId) || [];
+
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              units: units.sort()
+            },
+            hidden: viewMode !== 'machine'
+          };
+        });
+
+        machineUnits.forEach((units, machineId) => {
+          const existingNode = existingMachineNodes.find(n => String(n.data?.machineId) === machineId);
+          if (existingNode) {
+            return;
+          }
+
+          const position = positionByMachine.get(machineId) || { x: 40, y: 80 };
+          updatedNodes.push({
+            id: `machine-${modelId}-${machineId}`,
+            type: 'machineNode',
+            position,
+            data: {
+              machineId,
+              units: units.sort()
+            },
+            parentId: modelId,
+            extent: 'parent',
+            style: 'z-index: 8;',
+            hidden: viewMode !== 'machine'
+          });
+        });
+
+        return updatedNodes;
+      });
+    }
+
     // Create edges for relations found in application data
     // Use a Set to track processed relations and avoid duplicates
     const processedRelations = new Set();
-  const currentRelationKeys = new Set();
+    const currentRelationKeys = new Set();
+    const newRelationEdges = [];
     
     if (status?.applications) {
       const modelFrame = $nodes.find(n => n.id === modelId);
       const modelName = modelFrame?.data?.modelName || 'default';
+      const viewMode = modelFrame?.data?.viewMode || 'app';
       
       Object.entries(status.applications).forEach(([appName, appData]) => {
         if (appData.relations) {
@@ -862,9 +1071,15 @@
             
             relationList.forEach(relation => {
               const relatedApp = relation['related-application'];
+              const relatedEndpoint = relation['related-endpoint'] || getRelatedEndpoint(status, appName, relatedApp, relation.interface);
+              const resolvedRelatedEndpoint = relatedEndpoint === 'unknown' ? relation.interface : relatedEndpoint;
+              const endpoints = [
+                `${appName}:${endpoint}`,
+                `${relatedApp}:${resolvedRelatedEndpoint}`
+              ].sort();
               
-              // Create a unique key for this relation (sorted to avoid duplicates)
-              const relationKey = [appName, relatedApp].sort().join('::') + `::${relation.interface}`;
+              // Create a unique key for this relation (canonical order to avoid duplicates)
+              const relationKey = `${endpoints[0]}::${endpoints[1]}::${relation.interface}`;
               
               if (!processedRelations.has(relationKey)) {
                 processedRelations.add(relationKey);
@@ -875,17 +1090,7 @@
                 const node2 = $nodes.find(n => n.data?.charmName === relatedApp && n.parentId === modelId);
                 
                 if (node1 && node2) {
-                  // Check if edge already exists
-                  const edgeExists = $edges.some(e => 
-                    (e.source === node1.id && e.target === node2.id) ||
-                    (e.source === node2.id && e.target === node1.id)
-                  );
-                  
-                  if (!edgeExists) {
-                    // Create edge for this relation
-                    const relatedEndpoint = getRelatedEndpoint(status, appName, relatedApp, relation.interface);
-                    const resolvedRelatedEndpoint = relatedEndpoint === 'unknown' ? relation.interface : relatedEndpoint;
-
+                  // Create edge for this relation
                     let providerApp = appName;
                     let providerEndpoint = endpoint;
                     let requirerApp = relatedApp;
@@ -910,6 +1115,7 @@
                       type: 'relationEdge',
                       selectable: true,
                       focusable: true,
+                      hidden: viewMode !== 'app',
                       data: {
                         model: modelName,
                         isRelated: true, // Already related
@@ -925,9 +1131,8 @@
                       }
                     };
                     
-                    edges.update(e => [...e, newEdge]);
+                    newRelationEdges.push(newEdge);
                     console.log(`Created edge for relation: ${appName}:${endpoint} ↔ ${relatedApp} (${relation.interface})`);
-                  }
                 } else {
                   console.log(`Could not find nodes for relation: ${appName} ↔ ${relatedApp}`);
                 }
@@ -939,30 +1144,10 @@
     }
 
     // Remove edges for relations that no longer exist
-    edges.update(currentEdges =>
-      currentEdges.filter(edge => {
-        if (edge.type !== 'relationEdge') {
-          return true;
-        }
-
-        const existingKey = edge.data?.relationKey;
-
-        if (existingKey) {
-          return currentRelationKeys.has(existingKey);
-        }
-
-        const sourceApp = $nodes.find(n => n.id === edge.source)?.data?.charmName;
-        const targetApp = $nodes.find(n => n.id === edge.target)?.data?.charmName;
-        const relationInterface = edge.data?.relationInterface;
-
-        if (!sourceApp || !targetApp || !relationInterface) {
-          return true;
-        }
-
-        const fallbackKey = [sourceApp, targetApp].sort().join('::') + `::${relationInterface}`;
-        return currentRelationKeys.has(fallbackKey);
-      })
-    );
+    edges.update(currentEdges => {
+      const nonRelationEdges = currentEdges.filter(edge => edge.type !== 'relationEdge');
+      return applyEdgeGrouping([...nonRelationEdges, ...newRelationEdges]);
+    });
   }
 
   function handleDeploySuccess(nodeId, data) {
@@ -1064,7 +1249,7 @@
       }
 
       // Remove the edge from the canvas
-      edges.update(e => e.filter(edge => edge.id !== edgeId));
+  edges.update(e => applyEdgeGrouping(e.filter(edge => edge.id !== edgeId)));
 
       if (selectedEdgeId === edgeId) {
         selectedEdgeId = null;
@@ -1443,7 +1628,9 @@
       position: { x: 100 + (modelIdCounter * 150), y: 50 },
       data: { 
         modelName: `model-${modelIdCounter}`,
-        onRefreshSuccess: handleModelRefresh
+        onRefreshSuccess: handleModelRefresh,
+        onViewModeChange: handleViewModeChange,
+        viewMode: 'app'
       },
       style: 'width: 800px; height: 600px; z-index: 0;'
     };
@@ -1488,7 +1675,7 @@
       }
     };
 
-    edges.update(e => [...e, newEdge]);
+  edges.update(e => applyEdgeGrouping([...e, newEdge]));
 
     // Store the connection info to remove both edges if needed
     const sourceId = connection.source;
@@ -1553,7 +1740,7 @@
             return !shouldRemove;
           });
           console.log(`Edges before filter: ${e.length}, after filter: ${filtered.length}`);
-          return filtered;
+          return applyEdgeGrouping(filtered);
         });
       }, 5000);
     }
@@ -1568,7 +1755,9 @@
           position: { x: 100, y: 50 },
           data: { 
             modelName: selectedModel,
-            onRefreshSuccess: handleModelRefresh
+            onRefreshSuccess: handleModelRefresh,
+            onViewModeChange: handleViewModeChange,
+            viewMode: 'app'
           },
           style: 'width: 800px; height: 600px; z-index: 0;'
         }

@@ -16,11 +16,13 @@
   let autoRefreshInterval = $state('');
   let isAutoRefreshEnabled = $state(false);
   let autoRefreshTimer = $state(null);
+  let viewMode = $state(data?.viewMode || 'app');
 
   // Update drop target state when data changes
   $effect(() => {
     isDropTarget = data?.isDropTarget || false;
     isDragActive = data?.isDragActive || false;
+    viewMode = data?.viewMode || 'app';
   });
 
   // Derived state
@@ -92,6 +94,14 @@
     showDropdown = !showDropdown;
   }
 
+  function setViewMode(mode) {
+    const nextMode = mode === 'machine' ? 'machine' : 'app';
+    viewMode = nextMode;
+    if (data?.onViewModeChange) {
+      data.onViewModeChange(id, nextMode);
+    }
+  }
+
   // Clean up interval when component is destroyed
   $effect(() => {
     return () => {
@@ -126,6 +136,28 @@
 
     <div class="relative nopan">
       <div class="flex items-center space-x-1">
+        <div class="flex items-center rounded-lg border border-blue-600 overflow-hidden mr-2">
+          <button
+            onpointerdown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              setViewMode('app');
+            }}
+            class="px-3 py-2 text-xs font-semibold transition-colors {viewMode === 'app' ? 'bg-blue-600 text-white' : 'bg-white text-blue-700 hover:bg-blue-50'}"
+          >
+            App view
+          </button>
+          <button
+            onpointerdown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              setViewMode('machine');
+            }}
+            class="px-3 py-2 text-xs font-semibold transition-colors {viewMode === 'machine' ? 'bg-blue-600 text-white' : 'bg-white text-blue-700 hover:bg-blue-50'}"
+          >
+            Machine view
+          </button>
+        </div>
         <button
           onpointerdown={(e) => {
             if (!isRefreshing) {
