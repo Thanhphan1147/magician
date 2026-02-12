@@ -41,7 +41,8 @@ def parse_config_string(config_str: str) -> Dict[str, str]:
 
 
 def run_deploy_task(task_id: str, model: str, charm: str, channel: str, 
-                   revision: str, charm_name: str, config: str, constraints: str):
+                   revision: str, charm_name: str, config: str, constraints: str,
+                   machine_id: str | None = None, num_units: str | int | None = None):
     """
     Background task to run juju deploy
     """
@@ -56,7 +57,7 @@ def run_deploy_task(task_id: str, model: str, charm: str, channel: str,
         juju = jubilant.Juju(model=model)
         
         # Build deploy command arguments
-        deploy_kwargs = {
+        deploy_kwargs: Dict[str, Any] = {
             'charm': charm,
         }
         
@@ -76,6 +77,10 @@ def run_deploy_task(task_id: str, model: str, charm: str, channel: str,
                     k, v = pair.split('=', 1)
                     constraints_dict[k.strip()] = v.strip()
             deploy_kwargs['constraints'] = constraints_dict
+        if machine_id:
+            deploy_kwargs['to'] = str(machine_id)
+        elif num_units not in (None, '', 0, '0'):
+            deploy_kwargs['num_units'] = int(num_units)
         
         juju.deploy(**deploy_kwargs)
         result = {
@@ -164,7 +169,7 @@ def run_unrelate_task(task_id: str, model: str, endpoint_a: str, endpoint_b: str
             tasks[task_id]['error'] = str(e)
 
 
-def run_remove_task(task_id: str, model: str, application: str):
+def run_remove_task(task_id: str, model: str, application: str, force: bool = False):
     """
     Background task to run juju remove-application
     """
@@ -177,7 +182,10 @@ def run_remove_task(task_id: str, model: str, application: str):
         juju = jubilant.Juju(model=model)
         
         # Remove the application
-        juju.remove_application(application)
+        if force:
+            juju.cli('remove-application', '--force', application)
+        else:
+            juju.remove_application(application)
         
         result = {
             'success': True,
@@ -188,6 +196,36 @@ def run_remove_task(task_id: str, model: str, application: str):
             tasks[task_id]['status'] = 'completed'
             tasks[task_id]['result'] = result
             
+    except Exception as e:
+        with tasks_lock:
+            tasks[task_id]['status'] = 'failed'
+            tasks[task_id]['error'] = str(e)
+
+
+def run_remove_machine_task(task_id: str, model: str, machine_id: str, force: bool = False):
+    """
+    Background task to run juju remove-machine
+    """
+    try:
+        with tasks_lock:
+            tasks[task_id]['status'] = 'running'
+
+        juju = jubilant.Juju(model=model)
+
+        args = ['remove-machine', '--no-prompt']
+        if force:
+            args.append('--force')
+        args.append(str(machine_id))
+        juju.cli(*args)
+
+        result = {
+            'success': True,
+            'message': f'Removed machine {machine_id} from model {model}'
+        }
+
+        with tasks_lock:
+            tasks[task_id]['status'] = 'completed'
+            tasks[task_id]['result'] = result
     except Exception as e:
         with tasks_lock:
             tasks[task_id]['status'] = 'failed'
@@ -227,7 +265,9 @@ def deploy():
         data.get('revision', ''),
         data.get('charm_name', ''),
         data.get('config', ''),
-        data.get('constraints', '')
+        data.get('constraints', ''),
+        data.get('machine_id'),
+        data.get('num_units')
     )
     
     return jsonify({'task_id': task_id}), 202
@@ -331,9 +371,41 @@ def remove_application():
         run_remove_task,
         task_id,
         data.get('model'),
-        data.get('application')
+        data.get('application'),
+        bool(data.get('force'))
     )
     
+    return jsonify({'task_id': task_id}), 202
+
+
+@app.route('/api/remove-machine', methods=['POST'])
+def remove_machine():
+    """
+    Remove a machine from a Juju model
+    """
+    data = request.json
+
+    if not data.get('model') or data.get('machine_id') is None:
+        return jsonify({'error': 'model and machine_id are required'}), 400
+
+    task_id = str(uuid.uuid4())
+
+    with tasks_lock:
+        tasks[task_id] = {
+            'status': 'pending',
+            'type': 'remove-machine',
+            'model': data.get('model'),
+            'machine_id': str(data.get('machine_id'))
+        }
+
+    executor.submit(
+        run_remove_machine_task,
+        task_id,
+        data.get('model'),
+        str(data.get('machine_id')),
+        bool(data.get('force'))
+    )
+
     return jsonify({'task_id': task_id}), 202
 
 
@@ -435,18 +507,52 @@ def list_models():
     List all available Juju models
     """
     try:
-        # Use jubilant to get current model info
-        juju = jubilant.Juju()
-        model_info = juju.show_model()
-        
-        # Return as a list with one model (the current model)
-        models = [{
-            'name': model_info.short_name,
-            'cloud': model_info.cloud,
-            'type': model_info.model_type
-        }]
+        result = subprocess.run(
+            ['juju', 'models', '--format=json'],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+          return jsonify({'error': result.stderr.strip() or 'Failed to list models'}), 500
+
+        payload = json.loads(result.stdout or '{}')
+        raw_models = payload.get('models', [])
+        models = []
+        for model in raw_models:
+            models.append({
+                'name': model.get('name') or model.get('model') or '',
+                'cloud': model.get('cloud') or model.get('cloud-name') or model.get('cloud_name') or '',
+                'type': model.get('type') or model.get('model-type') or model.get('model_type') or ''
+            })
         return jsonify({'models': models}), 200
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models', methods=['POST'])
+def add_model():
+    """
+    Add a new Juju model
+    """
+    try:
+        data = request.json or {}
+        model_name = data.get('model_name') or data.get('name')
+        if not model_name:
+            return jsonify({'error': 'model_name is required'}), 400
+
+        result = subprocess.run(
+            ['juju', 'add-model', model_name],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr.strip() or 'Failed to add model'}), 500
+
+        return jsonify({'success': True, 'model': model_name}), 201
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

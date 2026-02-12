@@ -1,11 +1,12 @@
 <script>
   import { SvelteFlow, Controls, Background, MiniMap, Panel } from '@xyflow/svelte';
+  import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
   import CharmNode from './lib/nodes/CharmNode.svelte';
   import ModelFrame from './lib/nodes/ModelFrame.svelte';
   import MachineNode from './lib/nodes/MachineNode.svelte';
   import RelationEdge from './lib/edges/RelationEdge.svelte';
-  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig } from './lib/api.js';
+  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig, deployCharm, removeMachine, listModels, addModel } from './lib/api.js';
   import '@xyflow/svelte/dist/style.css';
 
   // Define custom node and edge types
@@ -20,13 +21,23 @@
   };
 
   // Runes state
-  let selectedModel = $state('default');
+  let selectedModel = $state('');
   let nodeIdCounter = $state(1);
   let modelIdCounter = $state(1);
   let edgeIdCounter = $state(1);
   let sidebarCharms = $state([]); // Charm templates in sidebar
   let sidebarCharmCounter = $state(1);
+  let savedCharmTemplates = $state([]);
+  let savedCharmCounter = $state(1);
   let expandedCharmOptions = $state(new Set()); // Track which charms have expanded options
+  let availableModels = $state([]); // List of models from Juju
+  let isLoadingModels = $state(false);
+  let modelLoadError = $state('');
+  let addModelName = $state('');
+  let isAddingModel = $state(false);
+  let addModelError = $state('');
+  let draggedModelName = $state(null);
+  let selectedMachineGroups = $state({}); // { [modelName]: string[] }
   let lastEdgeSelectAt = $state(0);
   let selectedEdgeId = $state(null);
   let selectedNodeId = $state(null);
@@ -43,20 +54,7 @@
   let notificationTimeout = $state(null);
 
   // Svelte Flow stores (required by the library)
-  const nodes = writable([
-    {
-      id: 'model-1',
-      type: 'modelFrame',
-      position: { x: 100, y: 50 },
-      data: { 
-        modelName: selectedModel,
-        onRefreshSuccess: handleModelRefresh,
-        onViewModeChange: handleViewModeChange,
-        viewMode: 'app'
-      },
-      style: 'width: 800px; height: 600px; z-index: 0;'
-    }
-  ]);
+  const nodes = writable([]);
 
   const edges = writable([]);
 
@@ -68,6 +66,70 @@
   let selectedRequirerApp = $derived(selectedEdge?.data?.requirerApp || selectedEdgeTarget?.data?.charmName || 'unknown');
   let selectedRequirerEndpoint = $derived(selectedEdge?.data?.requirerEndpoint || 'unknown');
   let selectedNode = $derived($nodes.find(node => node.id === selectedNodeId) || null);
+  let selectedMachine = $derived(selectedNode?.type === 'machineNode' ? selectedNode : null);
+  let pendingMachineDeploys = $state([]); // { id, modelId, machineId, label, position }
+
+  onMount(async () => {
+    isLoadingModels = true;
+    modelLoadError = '';
+    try {
+      const response = await listModels();
+      availableModels = response?.models || [];
+      if (!selectedModel && availableModels.length > 0) {
+        selectedModel = availableModels[0].name;
+      }
+    } catch (error) {
+      modelLoadError = error.message || 'Failed to load models';
+    } finally {
+      isLoadingModels = false;
+    }
+  });
+
+  function handleModelDragStart(event, model) {
+    draggedModelName = model?.name || null;
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('text/plain', draggedModelName || '');
+  }
+
+  function handleModelDragEnd() {
+    draggedModelName = null;
+  }
+
+  function getSelectedMachineGroup(modelName) {
+    return selectedMachineGroups?.[modelName] || [];
+  }
+
+  function toggleMachineSelection(modelName, machineId) {
+    if (!modelName || machineId === undefined || machineId === null) {
+      return;
+    }
+    const current = new Set(getSelectedMachineGroup(modelName));
+    const machineKey = String(machineId);
+    if (current.has(machineKey)) {
+      current.delete(machineKey);
+    } else {
+      current.add(machineKey);
+    }
+    selectedMachineGroups = {
+      ...selectedMachineGroups,
+      [modelName]: Array.from(current)
+    };
+  }
+
+  function pruneMachineSelection(modelName, existingIds) {
+    const current = getSelectedMachineGroup(modelName);
+    if (!current.length) {
+      return;
+    }
+    const filtered = current.filter(id => existingIds.has(String(id)));
+    if (filtered.length === current.length) {
+      return;
+    }
+    selectedMachineGroups = {
+      ...selectedMachineGroups,
+      [modelName]: filtered
+    };
+  }
 
   function parseConfigString(configValue) {
     return configValue
@@ -224,7 +286,7 @@
       return;
     }
 
-    const modelName = selectedNode.data?.modelName || selectedModel;
+  const modelName = selectedNode.data?.modelName;
     const appName = selectedNode.data?.charmName;
 
     if (!modelName || !appName) {
@@ -412,8 +474,8 @@
     // The actual data is in event.detail for Svelte Flow
     const { targetNode } = event.detail;
     
-    // Only snap charm nodes, not model frames
-    if (targetNode && targetNode.type === 'charmNode') {
+    // Snap charm and machine nodes, not model frames
+    if (targetNode && (targetNode.type === 'charmNode' || targetNode.type === 'machineNode')) {
       const snappedPosition = snapToGrid(targetNode.position);
       
       nodes.update(ns => 
@@ -474,8 +536,12 @@
         }))
       );
 
+      if (node.type === 'machineNode') {
+        return;
+      }
+
       if (node.type === 'charmNode') {
-        const modelName = node.data?.modelName || selectedModel;
+        const modelName = node.data?.modelName;
         const appName = node.data?.charmName;
 
         if (modelName && appName) {
@@ -739,13 +805,29 @@
   }
 
   function handleModelRefresh(modelId, status) {
+    const modelFrame = $nodes.find(n => n.id === modelId);
+    const modelName = modelFrame?.data?.modelName || 'default';
+    const viewMode = modelFrame?.data?.viewMode || 'app';
+    const isMachineView = viewMode === 'machine';
+
+    if (isMachineView) {
+      nodes.update(currentNodes =>
+        currentNodes.map(node => {
+          if (node.type !== 'charmNode') {
+            return node;
+          }
+          const parentId = node.parentId ?? node.parentNode;
+          const matchesModel = parentId === modelId || node.data?.modelName === modelName;
+          if (!matchesModel) {
+            return node;
+          }
+          return { ...node, hidden: true };
+        })
+      );
+    }
+
     // Create nodes for applications that exist in the model
-    if (status?.applications) {
-      // Find the model frame node to position apps near it
-      const modelFrame = $nodes.find(n => n.id === modelId);
-      const modelName = modelFrame?.data?.modelName || 'default';
-      const viewMode = modelFrame?.data?.viewMode || 'app';
-      
+    if (status?.applications && !isMachineView) {
       // Get all existing charm nodes in this model to preserve their positions
       const existingCharmNodes = $nodes.filter(n => 
         n.type === 'charmNode' && (n.parentId ?? n.parentNode) === modelId
@@ -876,7 +958,7 @@
 
         // Check if a node for this app already exists
         const existingNode = $nodes.find(n => 
-          n.data?.charmName === appName && n.parentId === modelId
+          n.data?.charmName === appName && (n.parentId ?? n.parentNode) === modelId
         );
         
         if (!existingNode) {
@@ -935,10 +1017,8 @@
     }
 
     if (status?.applications || status?.machines) {
-      const modelFrame = $nodes.find(n => n.id === modelId);
-      const viewMode = modelFrame?.data?.viewMode || 'app';
-
-      const machineUnits = new Map();
+  const machineUnits = new Map();
+  const machineInfoMap = new Map();
 
       if (status?.applications) {
         Object.entries(status.applications).forEach(([appName, appData]) => {
@@ -961,20 +1041,48 @@
       }
 
       if (status?.machines) {
-        Object.keys(status.machines).forEach(machineId => {
+        Object.entries(status.machines).forEach(([machineId, machineData]) => {
           if (!machineUnits.has(machineId)) {
             machineUnits.set(machineId, []);
           }
+
+          const statusInfo = machineData?.['juju-status'] || machineData?.status || {};
+          const baseInfo = machineData?.base || machineData?.['base'] || {};
+          const baseName = typeof baseInfo === 'string' ? baseInfo : (baseInfo?.name || baseInfo?.['name']);
+
+          const ipAddress =
+            machineData?.['dns-name'] ||
+            machineData?.['dns_name'] ||
+            machineData?.['ip-addresses']?.[0] ||
+            machineData?.['ip_addresses']?.[0] ||
+            machineData?.['network-interfaces']?.eth0?.['ip-addresses']?.[0] ||
+            machineData?.['network-interfaces']?.eth0?.['ip_addresses']?.[0] ||
+            machineData?.['public-address'] ||
+            machineData?.['public_address'] ||
+            machineData?.['private-address'] ||
+            machineData?.['private_address'] ||
+            machineData?.addresses?.[0]?.value ||
+            machineData?.addresses?.[0] ||
+            'unknown';
+
+          machineInfoMap.set(machineId, {
+            instanceId: machineData?.['instance-id'] || machineData?.['instance_id'] || 'unknown',
+            base: baseName || 'unknown',
+            state: statusInfo?.current || statusInfo?.status || machineData?.status || 'unknown',
+            message: statusInfo?.message || machineData?.['status-message'] || '',
+            ipAddress
+          });
         });
       }
 
       const machineIds = new Set(machineUnits.keys());
+      pruneMachineSelection(modelName, machineIds);
       const existingMachineNodes = $nodes.filter(n =>
         n.type === 'machineNode' && (n.parentId ?? n.parentNode) === modelId
       );
 
-      const MACHINE_NODE_WIDTH = 240;
-      const MACHINE_NODE_HEIGHT = 140;
+      const MACHINE_NODE_WIDTH = 280;
+      const MACHINE_NODE_HEIGHT = 150;
       const MACHINE_SPACING_X = 40;
       const MACHINE_SPACING_Y = 40;
       let machineX = 40;
@@ -983,7 +1091,8 @@
 
       const positionByMachine = new Map();
       Array.from(machineUnits.keys()).sort().forEach((machineId, index) => {
-        positionByMachine.set(machineId, { x: machineX, y: machineY });
+        const snapped = snapToGrid({ x: machineX, y: machineY });
+        positionByMachine.set(machineId, snapped);
         machineX += MACHINE_NODE_WIDTH + MACHINE_SPACING_X;
         if ((index + 1) % machinesPerRow === 0) {
           machineX = 40;
@@ -1000,6 +1109,9 @@
           if (parentId !== modelId) {
             return true;
           }
+          if (node.data?.isTemporary) {
+            return true;
+          }
           return machineIds.has(String(node.data?.machineId));
         });
 
@@ -1013,12 +1125,19 @@
           }
           const machineId = String(node.data?.machineId ?? '');
           const units = machineUnits.get(machineId) || [];
+          const pendingUnits = getPendingUnitsForMachine(modelId, machineId);
 
           return {
             ...node,
             data: {
               ...node.data,
-              units: units.sort()
+              units: units.sort(),
+              pendingUnits,
+              machineInfo: machineInfoMap.get(machineId) || node.data?.machineInfo,
+              modelName,
+              isSelected: getSelectedMachineGroup(modelName).includes(machineId),
+              onToggleSelect: toggleMachineSelection,
+              onRemoveMachine: handleRemoveMachine
             },
             hidden: viewMode !== 'machine'
           };
@@ -1037,7 +1156,47 @@
             position,
             data: {
               machineId,
-              units: units.sort()
+              units: units.sort(),
+              pendingUnits: getPendingUnitsForMachine(modelId, machineId),
+              machineInfo: machineInfoMap.get(machineId),
+              modelName,
+              isSelected: getSelectedMachineGroup(modelName).includes(machineId),
+              onToggleSelect: toggleMachineSelection,
+              onRemoveMachine: handleRemoveMachine
+            },
+            parentId: modelId,
+            extent: 'parent',
+            style: 'z-index: 8;',
+            hidden: viewMode !== 'machine'
+          });
+        });
+
+        const pendingNodes = getPendingMachineNodes(modelId);
+        pendingNodes.forEach(pending => {
+          const existingPending = updatedNodes.find(node => node.id === `machine-${modelId}-${pending.id}`);
+          if (existingPending) {
+            return;
+          }
+          const pendingPosition = snapToGrid(pending.position || { x: 40, y: 80 });
+          updatedNodes.push({
+            id: `machine-${modelId}-${pending.id}`,
+            type: 'machineNode',
+            position: pendingPosition,
+            data: {
+              machineId: 'pending',
+              units: [],
+              pendingUnits: [pending.label],
+              isTemporary: true,
+              machineInfo: {
+                instanceId: 'pending',
+                base: 'pending',
+                state: 'deploying',
+                message: ''
+              },
+              modelName,
+              isSelected: false,
+              onToggleSelect: toggleMachineSelection,
+              onRemoveMachine: handleRemoveMachine
             },
             parentId: modelId,
             extent: 'parent',
@@ -1057,7 +1216,6 @@
     const newRelationEdges = [];
     
     if (status?.applications) {
-      const modelFrame = $nodes.find(n => n.id === modelId);
       const modelName = modelFrame?.data?.modelName || 'default';
       const viewMode = modelFrame?.data?.viewMode || 'app';
       
@@ -1086,8 +1244,8 @@
                 currentRelationKeys.add(relationKey);
                 
                 // Find the nodes for these applications
-                const node1 = $nodes.find(n => n.data?.charmName === appName && n.parentId === modelId);
-                const node2 = $nodes.find(n => n.data?.charmName === relatedApp && n.parentId === modelId);
+                const node1 = $nodes.find(n => n.data?.charmName === appName && (n.parentId ?? n.parentNode) === modelId);
+                const node2 = $nodes.find(n => n.data?.charmName === relatedApp && (n.parentId ?? n.parentNode) === modelId);
                 
                 if (node1 && node2) {
                   // Create edge for this relation
@@ -1195,7 +1353,7 @@
 
     const sourceApp = sourceNode.data?.charmName;
     const targetApp = targetNode.data?.charmName;
-    const modelName = edge.data?.model || selectedModel;
+  const modelName = edge.data?.model || sourceNode.data?.modelName || targetNode.data?.modelName;
 
     // Get endpoint names from edge data, or use app names as fallback
     const endpointA = edge.data?.sourceEndpoint 
@@ -1269,6 +1427,74 @@
     }
   }
 
+  async function handleRemoveMachine(machineNode) {
+    if (!machineNode) {
+      return;
+    }
+
+    const machineId = machineNode.data?.machineId;
+    if (!machineId || machineId === 'pending') {
+      return;
+    }
+
+    const force = machineNode.force === true;
+
+    const modelId = machineNode.parentId ?? machineNode.parentNode;
+    const modelFrame = $nodes.find(node => node.id === modelId);
+    const modelName = machineNode.data?.modelName || modelFrame?.data?.modelName;
+
+    if (!modelName) {
+      showNotification('error', 'Missing model name for machine removal');
+      return;
+    }
+
+    try {
+  const { task_id } = await removeMachine(modelName, machineId, { force });
+      await pollTask(task_id);
+      showNotification('success', `Removed machine ${machineId}`);
+      const status = await getModelStatus(modelName);
+      handleModelRefresh(modelId, status);
+    } catch (error) {
+      showNotification('error', error.message || 'Failed to remove machine');
+    }
+  }
+
+  function handleMachineSsh(machineNode) {
+    const machineId = machineNode?.data?.machineId;
+    const modelName = machineNode?.data?.modelName;
+    if (!machineId || machineId === 'pending') {
+      showNotification('error', 'Machine ID is not available yet');
+      return;
+    }
+
+    const command = modelName ? `juju ssh -m ${modelName} ${machineId}` : `juju ssh ${machineId}`;
+    const sshWindow = window.open('', '_blank', 'noopener,noreferrer');
+    if (!sshWindow) {
+      showNotification('error', 'Unable to open SSH window');
+      return;
+    }
+
+    sshWindow.document.write(`
+      <html>
+        <head>
+          <title>SSH to Machine ${machineId}</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; padding: 24px; background: #0f172a; color: #e2e8f0; }
+            .cmd { background: #111827; padding: 12px 16px; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #93c5fd; }
+            button { margin-top: 12px; background: #2563eb; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+          </style>
+        </head>
+        <body>
+          <h2>Run this command in your terminal</h2>
+          <div class="cmd">${command}</div>
+          <button onclick="navigator.clipboard.writeText('${command.replace(/'/g, "\\'")}')">Copy command</button>
+          <p style="margin-top: 12px; font-size: 12px; color: #94a3b8;">This opens a new window with the Juju SSH command.</p>
+        </body>
+      </html>
+    `);
+    sshWindow.document.close();
+  }
+
   function addCharmNode() {
     // Add charm template to sidebar instead of canvas
     sidebarCharms = [...sidebarCharms, {
@@ -1276,6 +1502,7 @@
       charm: '',
       channel: 'stable',
       revision: '',
+      units: '',
       charmName: '',
       configPairs: [{ key: '', value: '' }],
       constraintPairs: [{ key: '', value: '' }]
@@ -1286,6 +1513,63 @@
     sidebarCharms = sidebarCharms.filter(c => c.id !== id);
     expandedCharmOptions.delete(id);
     expandedCharmOptions = new Set(expandedCharmOptions); // Trigger reactivity
+  }
+
+  function handleSaveCharmTemplate(template) {
+    if (!template?.charm?.trim()) {
+      showNotification('error', 'Charm name is required to save a template');
+      return;
+    }
+
+    const savedTemplate = {
+      id: `saved-charm-${savedCharmCounter++}`,
+      charm: template.charm,
+      channel: template.channel,
+      revision: template.revision,
+      units: template.units,
+      charmName: '',
+      configPairs: Array.isArray(template.configPairs)
+        ? template.configPairs.map(pair => ({ ...pair }))
+        : [{ key: '', value: '' }],
+      constraintPairs: Array.isArray(template.constraintPairs)
+        ? template.constraintPairs.map(pair => ({ ...pair }))
+        : [{ key: '', value: '' }]
+    };
+
+    savedCharmTemplates = [...savedCharmTemplates, savedTemplate];
+    showNotification('success', `Saved template for ${template.charm}`);
+  }
+
+  function updateSavedTemplate(id, field, value) {
+    savedCharmTemplates = savedCharmTemplates.map(template =>
+      template.id === id ? { ...template, [field]: value } : template
+    );
+  }
+
+  function removeSavedTemplate(id) {
+    savedCharmTemplates = savedCharmTemplates.filter(template => template.id !== id);
+  }
+
+  async function handleAddModel() {
+    const trimmedName = addModelName.trim();
+    if (!trimmedName) {
+      addModelError = 'Model name is required';
+      return;
+    }
+    addModelError = '';
+    isAddingModel = true;
+    try {
+      await addModel(trimmedName);
+      showNotification('success', `Added model ${trimmedName}`);
+      addModelName = '';
+      const response = await listModels();
+      availableModels = response?.models || [];
+    } catch (error) {
+      addModelError = error.message || 'Failed to add model';
+      showNotification('error', addModelError);
+    } finally {
+      isAddingModel = false;
+    }
   }
 
   function updateCharmTemplate(id, field, value) {
@@ -1362,6 +1646,7 @@
   // Drag and drop state
   let draggedCharmTemplate = $state(null);
   let dropTargetModelFrame = $state(null);
+  let dropTargetMachineId = $state(null);
 
   // Auto-resize model frames based on child charm nodes
   $effect(() => {
@@ -1437,9 +1722,229 @@
           }
         };
       }
+      if (node.type === 'machineNode') {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            isDropTarget: node.id === dropTargetMachineId,
+            isDragActive: draggedCharmTemplate !== null
+          }
+        };
+      }
       return node;
     }));
   });
+
+  function buildConfigAndConstraints(charmTemplate) {
+    const configStr = Array.isArray(charmTemplate.configPairs)
+      ? charmTemplate.configPairs
+          .filter(pair => pair.key.trim() !== '')
+          .map(pair => `${pair.key}=${pair.value}`)
+          .join(' ')
+      : (charmTemplate.config || '');
+
+    const constraintsStr = Array.isArray(charmTemplate.constraintPairs)
+      ? charmTemplate.constraintPairs
+          .filter(pair => pair.key.trim() !== '')
+          .map(pair => `${pair.key}=${pair.value}`)
+          .join(' ')
+      : (charmTemplate.constraints || '');
+
+    return { configStr, constraintsStr };
+  }
+
+  function getPendingUnitsForMachine(modelId, machineId) {
+    return pendingMachineDeploys
+      .filter(item => item.modelId === modelId && item.machineId === machineId)
+      .map(item => item.label);
+  }
+
+  function getPendingMachineNodes(modelId) {
+    return pendingMachineDeploys.filter(item => item.modelId === modelId && !item.machineId);
+  }
+
+  function addPendingMachineDeploy({ modelId, machineId, label, position }) {
+    const id = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const entry = { id, modelId, machineId: machineId ?? null, label, position };
+    pendingMachineDeploys = [...pendingMachineDeploys, entry];
+
+    if (machineId) {
+      nodes.update(currentNodes =>
+        currentNodes.map(node => {
+          if (node.type !== 'machineNode') {
+            return node;
+          }
+          const parentId = node.parentId ?? node.parentNode;
+          if (parentId !== modelId) {
+            return node;
+          }
+          if (String(node.data?.machineId) !== String(machineId)) {
+            return node;
+          }
+          const existingPending = node.data?.pendingUnits ?? [];
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              pendingUnits: [...existingPending, label]
+            }
+          };
+        })
+      );
+    } else {
+      const snapped = snapToGrid(position);
+      nodes.update(currentNodes => {
+        const modelFrame = currentNodes.find(node => node.id === modelId);
+        const viewMode = modelFrame?.data?.viewMode || 'app';
+        const modelName = modelFrame?.data?.modelName || '';
+        return [
+          ...currentNodes,
+          {
+            id: `machine-${modelId}-${id}`,
+            type: 'machineNode',
+            position: snapped,
+            data: {
+              machineId: 'pending',
+              units: [],
+              pendingUnits: [label],
+              isTemporary: true,
+              modelName,
+              isSelected: false,
+              onToggleSelect: toggleMachineSelection,
+              onRemoveMachine: handleRemoveMachine,
+              machineInfo: {
+                instanceId: 'pending',
+                base: 'pending',
+                state: 'deploying',
+                message: ''
+              }
+            },
+            parentId: modelId,
+            extent: 'parent',
+            style: 'z-index: 8;',
+            hidden: viewMode !== 'machine'
+          }
+        ];
+      });
+    }
+
+    return id;
+  }
+
+  function clearPendingMachineDeploy(pendingId) {
+    const removed = pendingMachineDeploys.find(item => item.id === pendingId);
+    pendingMachineDeploys = pendingMachineDeploys.filter(item => item.id !== pendingId);
+
+    if (removed?.machineId) {
+      nodes.update(currentNodes =>
+        currentNodes.map(node => {
+          if (node.type !== 'machineNode') {
+            return node;
+          }
+          const parentId = node.parentId ?? node.parentNode;
+          if (parentId !== removed.modelId) {
+            return node;
+          }
+          if (String(node.data?.machineId) !== String(removed.machineId)) {
+            return node;
+          }
+          const remainingPending = (node.data?.pendingUnits ?? []).filter(unit => unit !== removed.label);
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              pendingUnits: remainingPending
+            }
+          };
+        })
+      );
+    } else {
+      nodes.update(currentNodes =>
+        currentNodes.filter(node => !(node.type === 'machineNode' && node.id === `machine-${removed.modelId}-${removed.id}`))
+      );
+    }
+  }
+
+  async function handleMachineViewDeploy({ modelFrame, charmTemplate, machineTarget, position }) {
+    const modelName = modelFrame.data?.modelName;
+    if (!modelName) {
+      showNotification('error', 'Model name is missing for this deploy');
+      return;
+    }
+    const { configStr, constraintsStr } = buildConfigAndConstraints(charmTemplate);
+    const label = charmTemplate.charmName || charmTemplate.charm;
+    const targetMachineId = machineTarget?.data?.machineId;
+    const currentGroup = getSelectedMachineGroup(modelName);
+    const isTargetInGroup = targetMachineId
+      ? currentGroup.includes(String(targetMachineId))
+      : false;
+    const targetMachineIds = isTargetInGroup
+      ? currentGroup
+      : (targetMachineId ? [String(targetMachineId)] : []);
+
+    const pendingIds = targetMachineIds.length
+      ? targetMachineIds.map(machineId => addPendingMachineDeploy({
+          modelId: modelFrame.id,
+          machineId,
+          label,
+          position
+        }))
+      : [addPendingMachineDeploy({
+          modelId: modelFrame.id,
+          machineId: null,
+          label,
+          position
+        })];
+
+    try {
+      const { task_id } = await deployCharm(modelName, charmTemplate.charm, {
+        channel: charmTemplate.channel,
+        revision: charmTemplate.revision,
+        charm_name: charmTemplate.charmName,
+        config: configStr,
+        constraints: constraintsStr,
+        machine_id: targetMachineIds.length ? targetMachineIds.join(',') : ''
+      });
+
+      await pollTask(task_id);
+      if (targetMachineIds.length > 0) {
+        showNotification('success', `Deploying ${label} to machine${targetMachineIds.length > 1 ? 's' : ''} ${targetMachineIds.join(', ')}`);
+      } else {
+        showNotification('success', `Deploying ${label} to new machine`);
+      }
+    } catch (error) {
+      showNotification('error', error.message || 'Failed to deploy charm');
+    } finally {
+      pendingIds.forEach(id => clearPendingMachineDeploy(id));
+      try {
+        const status = await getModelStatus(modelName);
+        handleModelRefresh(modelFrame.id, status);
+      } catch (error) {
+        console.error('Failed to refresh model after deploy:', error);
+      }
+    }
+  }
+
+  function findMachineNodeAtPoint(clientX, clientY) {
+    const machineNodes = $nodes.filter(node => node.type === 'machineNode' && !node.hidden);
+    for (const node of machineNodes) {
+      const element = document.querySelector(`[data-id="${node.id}"]`);
+      if (!element) {
+        continue;
+      }
+      const rect = element.getBoundingClientRect();
+      if (
+        clientX >= rect.left &&
+        clientX <= rect.right &&
+        clientY >= rect.top &&
+        clientY <= rect.bottom
+      ) {
+        return node;
+      }
+    }
+    return null;
+  }
 
   function handleCharmDragStart(event, charmTemplate) {
     // Don't start drag if clicking on an input or button
@@ -1460,21 +1965,39 @@
   function handleCharmDragEnd(event) {
     draggedCharmTemplate = null;
     dropTargetModelFrame = null;
+    dropTargetMachineId = null;
   }
 
   function handleCanvasDragOver(event) {
     if (draggedCharmTemplate) {
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
+      const machineTarget = findMachineNodeAtPoint(event.clientX, event.clientY);
+      dropTargetMachineId = machineTarget ? machineTarget.id : null;
+    } else if (draggedModelName) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
     }
   }
 
-  function handleCanvasDrop(event) {
+  async function handleCanvasDrop(event) {
     event.preventDefault();
     
+    if (draggedModelName) {
+      const modelName = draggedModelName;
+      const canvasRect = event.currentTarget.getBoundingClientRect();
+      const x = event.clientX - canvasRect.left;
+      const y = event.clientY - canvasRect.top;
+      await addModelFrame(modelName, { x: Math.max(20, x - 200), y: Math.max(20, y - 100) });
+      draggedModelName = null;
+      dropTargetMachineId = null;
+      return;
+    }
+
     if (!draggedCharmTemplate) return;
 
     const charmTemplate = draggedCharmTemplate;
+    const machineTarget = findMachineNodeAtPoint(event.clientX, event.clientY);
     
     // Get drop position on the canvas
     const canvasRect = event.currentTarget.getBoundingClientRect();
@@ -1482,25 +2005,28 @@
     const y = event.clientY - canvasRect.top;
     
     // Find which model frame (if any) the drop happened on
-    const modelFrame = $nodes.find(node => {
-      if (node.type !== 'modelFrame') return false;
-      
-      // Get the model frame's DOM element to check bounds
-      const frameElement = document.querySelector(`[data-id="${node.id}"]`);
-      if (!frameElement) return false;
-      
-      const frameRect = frameElement.getBoundingClientRect();
-      return (
-        event.clientX >= frameRect.left &&
-        event.clientX <= frameRect.right &&
-        event.clientY >= frameRect.top &&
-        event.clientY <= frameRect.bottom
-      );
-    });
+    const modelFrame = machineTarget
+      ? $nodes.find(node => node.id === (machineTarget.parentId ?? machineTarget.parentNode))
+      : $nodes.find(node => {
+          if (node.type !== 'modelFrame') return false;
+
+          // Get the model frame's DOM element to check bounds
+          const frameElement = document.querySelector(`[data-id="${node.id}"]`);
+          if (!frameElement) return false;
+
+          const frameRect = frameElement.getBoundingClientRect();
+          return (
+            event.clientX >= frameRect.left &&
+            event.clientX <= frameRect.right &&
+            event.clientY >= frameRect.top &&
+            event.clientY <= frameRect.bottom
+          );
+        });
 
     if (!modelFrame) {
       alert('Please drop the charm into a model frame');
       draggedCharmTemplate = null;
+      dropTargetMachineId = null;
       return;
     }
 
@@ -1509,6 +2035,61 @@
     const frameRect = frameElement.getBoundingClientRect();
     const relativeX = event.clientX - frameRect.left;
     const relativeY = event.clientY - frameRect.top;
+
+    const { configStr, constraintsStr } = buildConfigAndConstraints(charmTemplate);
+    const isMachineView = modelFrame.data?.viewMode === 'machine';
+
+    if (isMachineView) {
+      await handleMachineViewDeploy({
+        modelFrame,
+        charmTemplate,
+        machineTarget,
+        position: { x: relativeX, y: relativeY }
+      });
+      sidebarCharms = sidebarCharms.filter(c => c.id !== charmTemplate.id);
+      draggedCharmTemplate = null;
+      dropTargetModelFrame = null;
+      dropTargetMachineId = null;
+      return;
+    }
+
+    if (machineTarget) {
+      nodeIdCounter++;
+      const newNode = {
+        id: `charm-${nodeIdCounter}`,
+        type: 'charmNode',
+        position: {
+          x: Math.max(20, relativeX - 150),
+          y: Math.max(20, relativeY - 100)
+        },
+        data: {
+          charm: charmTemplate.charm,
+          channel: charmTemplate.channel,
+          revision: charmTemplate.revision,
+          charmName: charmTemplate.charmName || charmTemplate.charm,
+          config: configStr,
+          constraints: constraintsStr,
+          model: modelFrame.data.modelName,
+          modelName: modelFrame.data.modelName,
+          onDeploySuccess: handleDeploySuccess,
+          onRemoveNode: handleRemoveNode,
+          autoDeployOnDrop: true,
+          machineId: machineTarget.data?.machineId,
+          desiredUnits: ''
+        },
+        parentNode: modelFrame.id,
+        extent: 'parent',
+        style: 'z-index: 10;',
+        hidden: isMachineView
+      };
+
+      nodes.update(n => [...n, newNode]);
+      sidebarCharms = sidebarCharms.filter(c => c.id !== charmTemplate.id);
+      draggedCharmTemplate = null;
+      dropTargetModelFrame = null;
+      dropTargetMachineId = null;
+      return;
+    }
 
     // Create a charm node on the canvas at the drop position
     nodeIdCounter++;
@@ -1524,17 +2105,19 @@
         channel: charmTemplate.channel,
         revision: charmTemplate.revision,
         charmName: charmTemplate.charmName || charmTemplate.charm,
-        config: charmTemplate.config,
-        constraints: charmTemplate.constraints,
+        config: configStr,
+        constraints: constraintsStr,
         model: modelFrame.data.modelName,
         modelName: modelFrame.data.modelName,
         onDeploySuccess: handleDeploySuccess,
         onRemoveNode: handleRemoveNode,
-        autoDeployOnDrop: true // Signal to auto-deploy
+        autoDeployOnDrop: true, // Signal to auto-deploy
+        desiredUnits: charmTemplate.units
       },
       parentNode: modelFrame.id,
       extent: 'parent',
-      style: 'z-index: 10;'
+      style: 'z-index: 10;',
+      hidden: isMachineView
     };
 
     nodes.update(n => [...n, newNode]);
@@ -1544,6 +2127,7 @@
     
     draggedCharmTemplate = null;
     dropTargetModelFrame = null;
+    dropTargetMachineId = null;
   }
 
   function handleModelFrameDragOver(event, modelFrameId) {
@@ -1560,12 +2144,13 @@
     }
   }
 
-  function handleModelFrameDrop(event, modelFrame) {
+  async function handleModelFrameDrop(event, modelFrame) {
     event.preventDefault();
     
     if (!draggedCharmTemplate) return;
 
     const charmTemplate = draggedCharmTemplate;
+    const isMachineView = modelFrame.data?.viewMode === 'machine';
     
     // Get the drop position relative to the model frame
     const modelFrameElement = event.currentTarget;
@@ -1573,17 +2158,20 @@
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
 
-    // Convert configPairs to config string (key=value pairs)
-    const configStr = charmTemplate.configPairs
-      .filter(pair => pair.key.trim() !== '')
-      .map(pair => `${pair.key}=${pair.value}`)
-      .join(' ');
-
-    // Convert constraintPairs to constraints string
-    const constraintsStr = charmTemplate.constraintPairs
-      .filter(pair => pair.key.trim() !== '')
-      .map(pair => `${pair.key}=${pair.value}`)
-      .join(' ');
+    const { configStr, constraintsStr } = buildConfigAndConstraints(charmTemplate);
+    if (isMachineView) {
+      await handleMachineViewDeploy({
+        modelFrame,
+        charmTemplate,
+        machineTarget: null,
+        position: { x, y }
+      });
+      sidebarCharms = sidebarCharms.filter(c => c.id !== charmTemplate.id);
+      draggedCharmTemplate = null;
+      dropTargetModelFrame = null;
+      dropTargetMachineId = null;
+      return;
+    }
 
     // Create a charm node on the canvas at the drop position
     nodeIdCounter++;
@@ -1604,11 +2192,13 @@
         config: configStr,
         constraints: constraintsStr,
         onDeploySuccess: handleDeploySuccess,
-        autoDeployOnDrop: true // Signal to auto-deploy
+        autoDeployOnDrop: true, // Signal to auto-deploy
+        desiredUnits: charmTemplate.units
       },
       parentNode: modelFrame.id,
       extent: 'parent',
-      style: 'z-index: 10;'
+      style: 'z-index: 10;',
+      hidden: isMachineView
     };
 
     nodes.update(n => [...n, newNode]);
@@ -1618,24 +2208,157 @@
     
     draggedCharmTemplate = null;
     dropTargetModelFrame = null;
+    dropTargetMachineId = null;
   }
 
-  function addModelFrame() {
-    modelIdCounter++;
+  async function addModelFrame(modelName, position = { x: 120, y: 60 }) {
+    if (!modelName) {
+      showNotification('error', 'Model name is required');
+      return;
+    }
+
+    const existing = $nodes.find(node => node.type === 'modelFrame' && node.data?.modelName === modelName);
+    if (existing) {
+      showNotification('error', `Model ${modelName} is already on the canvas`);
+      return;
+    }
+
+    const resolvedPosition = findAvailableModelPosition(position);
+    const modelId = `model-${modelIdCounter++}`;
     const newNode = {
-      id: `model-${modelIdCounter}`,
+      id: modelId,
       type: 'modelFrame',
-      position: { x: 100 + (modelIdCounter * 150), y: 50 },
+      position: resolvedPosition,
       data: { 
-        modelName: `model-${modelIdCounter}`,
+        modelName,
         onRefreshSuccess: handleModelRefresh,
         onViewModeChange: handleViewModeChange,
+        onClose: handleRemoveModelFrame,
         viewMode: 'app'
       },
       style: 'width: 800px; height: 600px; z-index: 0;'
     };
 
     nodes.update(n => [...n, newNode]);
+
+    try {
+      const status = await getModelStatus(modelName);
+      handleModelRefresh(modelId, status);
+    } catch (error) {
+      showNotification('error', `Failed to load model ${modelName}: ${error.message}`);
+    }
+  }
+
+  function parseModelFrameSize(style) {
+    const defaultSize = { width: 800, height: 600 };
+    if (!style) {
+      return defaultSize;
+    }
+
+    const widthMatch = /width:\s*(\d+)px/.exec(style);
+    const heightMatch = /height:\s*(\d+)px/.exec(style);
+    return {
+      width: widthMatch ? Number(widthMatch[1]) : defaultSize.width,
+      height: heightMatch ? Number(heightMatch[1]) : defaultSize.height
+    };
+  }
+
+  function findAvailableModelPosition(initialPosition) {
+    const existingFrames = $nodes.filter(node => node.type === 'modelFrame');
+    if (!existingFrames.length) {
+      return { x: Math.max(20, initialPosition.x), y: Math.max(20, initialPosition.y) };
+    }
+
+    const baseSize = parseModelFrameSize('width: 800px; height: 600px;');
+    const padding = 20;
+    const step = 40;
+    const maxAttempts = 120;
+
+    const isOverlapping = (candidate) => {
+      return existingFrames.some(frame => {
+        const frameSize = parseModelFrameSize(frame.style);
+        const frameLeft = frame.position.x;
+        const frameTop = frame.position.y;
+        const frameRight = frameLeft + frameSize.width + padding;
+        const frameBottom = frameTop + frameSize.height + padding;
+
+        const candidateLeft = candidate.x;
+        const candidateTop = candidate.y;
+        const candidateRight = candidateLeft + baseSize.width + padding;
+        const candidateBottom = candidateTop + baseSize.height + padding;
+
+        return !(
+          candidateRight <= frameLeft ||
+          candidateLeft >= frameRight ||
+          candidateBottom <= frameTop ||
+          candidateTop >= frameBottom
+        );
+      });
+    };
+
+    const start = {
+      x: Math.max(20, initialPosition.x),
+      y: Math.max(20, initialPosition.y)
+    };
+
+    if (!isOverlapping(start)) {
+      return start;
+    }
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const xOffset = step * (attempt % 6);
+      const yOffset = step * Math.floor(attempt / 6);
+      const candidate = {
+        x: start.x + xOffset,
+        y: start.y + yOffset
+      };
+      if (!isOverlapping(candidate)) {
+        return candidate;
+      }
+    }
+
+    return start;
+  }
+
+  function handleRemoveModelFrame(modelId) {
+    const modelFrame = $nodes.find(node => node.id === modelId);
+    if (!modelFrame) {
+      return;
+    }
+
+    const modelName = modelFrame.data?.modelName;
+    const removedNodeIds = new Set();
+
+    nodes.update(currentNodes =>
+      currentNodes.filter(node => {
+        const parentId = node.parentId ?? node.parentNode;
+        const shouldRemove = node.id === modelId || parentId === modelId;
+        if (shouldRemove) {
+          removedNodeIds.add(node.id);
+        }
+        return !shouldRemove;
+      })
+    );
+
+    edges.update(currentEdges =>
+      currentEdges.filter(edge => !removedNodeIds.has(edge.source) && !removedNodeIds.has(edge.target))
+    );
+
+    pendingMachineDeploys = pendingMachineDeploys.filter(entry => entry.modelId !== modelId);
+    if (modelName && selectedMachineGroups?.[modelName]) {
+      const { [modelName]: _removed, ...rest } = selectedMachineGroups;
+      selectedMachineGroups = rest;
+    }
+
+    if (selectedNodeId && removedNodeIds.has(selectedNodeId)) {
+      selectedNodeId = null;
+    }
+    if (selectedEdgeId) {
+      const selectedEdge = $edges.find(edge => edge.id === selectedEdgeId);
+      if (selectedEdge && (removedNodeIds.has(selectedEdge.source) || removedNodeIds.has(selectedEdge.target))) {
+        selectedEdgeId = null;
+      }
+    }
   }
 
   async function onConnect(connection) {
@@ -1650,6 +2373,19 @@
 
     const sourceApp = sourceNode.data?.appName || sourceNode.data?.charmName;
     const targetApp = targetNode.data?.appName || targetNode.data?.charmName;
+    const sourceModel = sourceNode.data?.modelName || sourceNode.data?.model;
+    const targetModel = targetNode.data?.modelName || targetNode.data?.model;
+    const modelName = sourceModel || targetModel;
+
+    if (sourceModel && targetModel && sourceModel !== targetModel) {
+      showNotification('error', 'Cannot relate applications across different models');
+      return;
+    }
+
+    if (!modelName) {
+      showNotification('error', 'Model name is missing for this relation');
+      return;
+    }
 
     if (!sourceApp || !targetApp) {
       console.error('Could not determine app names');
@@ -1669,7 +2405,7 @@
       selectable: true,
       focusable: true,
       data: {
-        model: selectedModel,
+        model: modelName,
         isRelated: false,
         relationError: ''
       }
@@ -1683,7 +2419,7 @@
 
     // Call API to create relation (simple integrate without endpoints)
     try {
-      const { task_id } = await createRelation(selectedModel, sourceApp, targetApp);
+  const { task_id } = await createRelation(modelName, sourceApp, targetApp);
       
       // Poll for completion
       await pollTask(task_id);
@@ -1720,7 +2456,7 @@
         message: error.message,
         sourceId,
         targetId,
-        model: selectedModel,
+        model: modelName,
         providerApp: sourceApp,
         requirerApp: targetApp
       };
@@ -1748,24 +2484,12 @@
 
   function clearCanvas() {
     if (confirm('Clear all nodes and edges?')) {
-      nodes.set([
-        {
-          id: 'model-1',
-          type: 'modelFrame',
-          position: { x: 100, y: 50 },
-          data: { 
-            modelName: selectedModel,
-            onRefreshSuccess: handleModelRefresh,
-            onViewModeChange: handleViewModeChange,
-            viewMode: 'app'
-          },
-          style: 'width: 800px; height: 600px; z-index: 0;'
-        }
-      ]);
+      nodes.set([]);
       edges.set([]);
       nodeIdCounter = 1;
       modelIdCounter = 1;
       edgeIdCounter = 1;
+      selectedMachineGroups = {};
     }
   }
 </script>
@@ -1780,15 +2504,50 @@
 
       <div class="divider border-t border-gray-600"></div>
 
-      <!-- Model Selection -->
+      <!-- Models -->
       <div>
-        <label class="block text-sm font-medium mb-2">Active Model</label>
-        <input
-          type="text"
-          bind:value={selectedModel}
-          class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-          placeholder="default"
-        />
+        <label class="block text-sm font-medium mb-2">Models</label>
+        {#if isLoadingModels}
+          <div class="text-xs text-gray-400">Loading models...</div>
+        {:else if modelLoadError}
+          <div class="text-xs text-red-400">{modelLoadError}</div>
+        {:else if availableModels.length === 0}
+          <div class="text-xs text-gray-400">No models found.</div>
+        {:else}
+          <div class="space-y-2">
+            {#each availableModels as model (model.name)}
+              <div
+                class="bg-gray-700 rounded-lg p-2 cursor-move hover:bg-gray-600 transition-colors border border-transparent hover:border-blue-500"
+                draggable="true"
+                ondragstart={(event) => handleModelDragStart(event, model)}
+                ondragend={handleModelDragEnd}
+                title="Drag to canvas to add model"
+              >
+                <div class="text-sm font-semibold text-white">{model.name}</div>
+                <div class="text-[11px] text-gray-400">{model.cloud} • {model.type}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <div class="mt-3 space-y-2">
+          <input
+            type="text"
+            value={addModelName}
+            oninput={(event) => addModelName = event.target.value}
+            placeholder="New model name"
+            class="w-full px-2 py-1 text-sm bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <button
+            onclick={handleAddModel}
+            disabled={isAddingModel}
+            class="w-full px-3 py-2 text-xs font-semibold rounded bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+          >
+            {isAddingModel ? 'Adding...' : 'Add Model'}
+          </button>
+          {#if addModelError}
+            <div class="text-xs text-red-400">{addModelError}</div>
+          {/if}
+        </div>
       </div>
 
       <div class="divider border-t border-gray-600"></div>
@@ -1805,16 +2564,6 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
           </svg>
           <span>Add Charm Node</span>
-        </button>
-
-        <button
-          onclick={addModelFrame}
-          class="w-full px-4 py-3 bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors text-left flex items-center space-x-3"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
-          </svg>
-          <span>Add Model Frame</span>
         </button>
 
         <button
@@ -1846,7 +2595,7 @@
                 ondragend={handleCharmDragEnd}
                 title={charmTemplate.charm.trim() ? 'Drag to model frame to deploy' : 'Enter charm name to enable dragging'}
               >
-                <div class="flex justify-between items-start gap-2">
+                <div class="flex justify-between items-start gap-2 min-w-0">
                   <div class="flex-1 space-y-2 min-w-0">
                     <input
                       type="text"
@@ -1854,7 +2603,7 @@
                       oninput={(e) => updateCharmTemplate(charmTemplate.id, 'charm', e.target.value)}
                       placeholder="Charm name"
                       draggable="false"
-                      class="w-full px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      class="w-full min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
                     <input
                       type="text"
@@ -1862,17 +2611,17 @@
                       oninput={(e) => updateCharmTemplate(charmTemplate.id, 'charmName', e.target.value)}
                       placeholder="App name (optional)"
                       draggable="false"
-                      class="w-full px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      class="w-full min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <input
+                      type="text"
+                      value={charmTemplate.channel}
+                      oninput={(e) => updateCharmTemplate(charmTemplate.id, 'channel', e.target.value)}
+                      placeholder="Channel"
+                      draggable="false"
+                      class="w-full min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
                     <div class="flex space-x-2">
-                      <input
-                        type="text"
-                        value={charmTemplate.channel}
-                        oninput={(e) => updateCharmTemplate(charmTemplate.id, 'channel', e.target.value)}
-                        placeholder="Channel"
-                        draggable="false"
-                        class="flex-1 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500 min-w-0"
-                      />
                       <input
                         type="text"
                         value={charmTemplate.revision}
@@ -1881,17 +2630,40 @@
                         draggable="false"
                         class="w-16 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500 flex-shrink-0"
                       />
+                      <input
+                        type="number"
+                        value={charmTemplate.units}
+                        oninput={(e) => updateCharmTemplate(charmTemplate.id, 'units', e.target.value)}
+                        placeholder="Units"
+                        min="1"
+                        draggable="false"
+                        class="w-20 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500 flex-shrink-0"
+                      />
                     </div>
                   </div>
-                  <button
-                    onclick={() => removeCharmTemplate(charmTemplate.id)}
-                    class="ml-2 p-1 text-red-400 hover:text-red-300 flex-shrink-0"
-                    title="Remove"
-                  >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                  <div class="flex flex-col gap-2">
+                    <button
+                      onclick={() => handleSaveCharmTemplate(charmTemplate)}
+                      class="p-1 text-emerald-300 hover:text-emerald-200"
+                      title="Save template"
+                      type="button"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h9l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 9h6v6H9z" />
+                      </svg>
+                    </button>
+                    <button
+                      onclick={() => removeCharmTemplate(charmTemplate.id)}
+                      class="p-1 text-red-400 hover:text-red-300"
+                      title="Remove"
+                      type="button"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 
                 <!-- More Options Toggle -->
@@ -1918,14 +2690,14 @@
                     <div class="space-y-2">
                       <label class="text-xs font-semibold text-gray-300">Config</label>
                       {#each charmTemplate.configPairs as configPair, index (index)}
-                        <div class="config-pair flex gap-2 items-center">
+                        <div class="config-pair flex gap-2 items-center min-w-0">
                           <input
                             type="text"
                             value={configPair.key}
                             oninput={(e) => updateConfigPair(charmTemplate.id, index, 'key', e.target.value)}
                             placeholder="key"
                             draggable="false"
-                            class="flex-1 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            class="flex-1 min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />
                           <input
                             type="text"
@@ -1933,7 +2705,7 @@
                             oninput={(e) => updateConfigPair(charmTemplate.id, index, 'value', e.target.value)}
                             placeholder="value"
                             draggable="false"
-                            class="flex-1 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            class="flex-1 min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />
                           {#if charmTemplate.configPairs.length > 1}
                             <button
@@ -1962,14 +2734,14 @@
                     <div class="space-y-2">
                       <label class="text-xs font-semibold text-gray-300">Constraints</label>
                       {#each charmTemplate.constraintPairs as constraintPair, index (index)}
-                        <div class="constraint-pair flex gap-2 items-center">
+                        <div class="constraint-pair flex gap-2 items-center min-w-0">
                           <input
                             type="text"
                             value={constraintPair.key}
                             oninput={(e) => updateConstraintPair(charmTemplate.id, index, 'key', e.target.value)}
                             placeholder="key"
                             draggable="false"
-                            class="flex-1 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            class="flex-1 min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />
                           <input
                             type="text"
@@ -1977,7 +2749,7 @@
                             oninput={(e) => updateConstraintPair(charmTemplate.id, index, 'value', e.target.value)}
                             placeholder="value"
                             draggable="false"
-                            class="flex-1 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            class="flex-1 min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />
                           {#if charmTemplate.constraintPairs.length > 1}
                             <button
@@ -2020,10 +2792,61 @@
 
       <div class="divider border-t border-gray-600"></div>
 
+      <!-- Saved Charm Templates -->
+      <div class="saved-templates flex-1 overflow-y-auto space-y-2">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase mb-3">Saved Charm Templates</h2>
+
+        {#if savedCharmTemplates.length === 0}
+          <p class="text-xs text-gray-500 italic">No saved templates yet.</p>
+        {:else}
+          <div class="space-y-2">
+            {#each savedCharmTemplates as savedTemplate (savedTemplate.id)}
+              <div
+                class="bg-gray-700 rounded-lg p-3 space-y-2 cursor-move hover:bg-gray-600 transition-colors border-2 border-transparent hover:border-emerald-500"
+                draggable={savedTemplate.charm.trim() !== ''}
+                ondragstart={(e) => handleCharmDragStart(e, savedTemplate)}
+                ondragend={handleCharmDragEnd}
+                title="Drag to model frame to deploy"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div class="text-sm font-semibold text-white truncate">{savedTemplate.charm}</div>
+                  <button
+                    onclick={() => removeSavedTemplate(savedTemplate.id)}
+                    class="p-1 text-red-400 hover:text-red-300"
+                    title="Remove saved template"
+                    type="button"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={savedTemplate.charmName}
+                  oninput={(event) => updateSavedTemplate(savedTemplate.id, 'charmName', event.target.value)}
+                  placeholder="App name (optional)"
+                  draggable="false"
+                  class="w-full min-w-0 px-2 py-1 text-sm bg-gray-600 border border-gray-500 rounded text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+                <div class="text-xs text-gray-300 space-y-1">
+                  <div>Channel: {savedTemplate.channel || 'default'}</div>
+                  <div>Revision: {savedTemplate.revision || 'latest'}</div>
+                  <div>Units: {savedTemplate.units || '1'}</div>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <div class="divider border-t border-gray-600"></div>
+
       <!-- Instructions -->
       <div class="instructions text-xs text-gray-400 space-y-1">
         <p><strong>Tips:</strong></p>
         <ul class="list-disc list-inside space-y-1">
+          <li>Drag a model into the canvas to add a model frame</li>
           <li>Add charm nodes to configure them in the sidebar</li>
           <li>Drag charm templates and drop into model frames to deploy</li>
           <li>Charm nodes will auto-deploy when dropped</li>
@@ -2125,6 +2948,24 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                 </svg>
                 Remove Relation
+              </button>
+            </div>
+          {:else if selectedMachine}
+            <div class="details-panel bg-white border-2 border-indigo-500 rounded-lg shadow-lg p-3 min-w-[220px]">
+              <div class="text-xs font-semibold text-gray-700 mb-2">Machine Details</div>
+              <div class="text-xs text-gray-500 mb-2">Machine {selectedMachine.data?.machineId ?? 'unknown'}</div>
+              <div class="space-y-1 text-xs text-gray-600">
+                <div><span class="font-medium">Inst ID:</span> {selectedMachine.data?.machineInfo?.instanceId || 'unknown'}</div>
+                <div><span class="font-medium">IP:</span> {selectedMachine.data?.machineInfo?.ipAddress || 'unknown'}</div>
+                <div><span class="font-medium">Base:</span> {selectedMachine.data?.machineInfo?.base || 'unknown'}</div>
+                <div><span class="font-medium">State:</span> {selectedMachine.data?.machineInfo?.state || 'unknown'}</div>
+                <div><span class="font-medium">Message:</span> {selectedMachine.data?.machineInfo?.message || '—'}</div>
+              </div>
+              <button
+                onclick={() => handleMachineSsh(selectedMachine)}
+                class="mt-3 w-full px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition-colors"
+              >
+                SSH
               </button>
             </div>
           {:else if selectedNode && selectedNode.type === 'charmNode'}
