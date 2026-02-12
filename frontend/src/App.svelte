@@ -6,7 +6,7 @@
   import ModelFrame from './lib/nodes/ModelFrame.svelte';
   import MachineNode from './lib/nodes/MachineNode.svelte';
   import RelationEdge from './lib/edges/RelationEdge.svelte';
-  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig, deployCharm, removeMachine, listModels, addModel } from './lib/api.js';
+  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig, deployCharm, removeMachine, listModels, addModel, runMachineCommand } from './lib/api.js';
   import '@xyflow/svelte/dist/style.css';
 
   // Define custom node and edge types
@@ -44,6 +44,9 @@
   let showFullConfig = $state(false);
   let configEdits = $state({});
   let isUpdatingConfig = $state(false);
+  let machineCommandInput = $state('');
+  let machineCommandStatus = $state(null);
+  let isRunningMachineCommand = $state(false);
   let relationCreateError = $state(null); // { message, sourceId, targetId, model, providerApp, requirerApp }
   let providerEndpointInput = $state('');
   let requirerEndpointInput = $state('');
@@ -280,6 +283,52 @@
     });
     configEdits = newEdits;
   });
+
+  $effect(() => {
+    if (!selectedMachine) {
+      machineCommandInput = '';
+      machineCommandStatus = null;
+      isRunningMachineCommand = false;
+      return;
+    }
+
+    machineCommandStatus = null;
+  });
+
+  async function handleRunMachineCommand() {
+    if (!selectedMachine || isRunningMachineCommand) {
+      return;
+    }
+
+    const machineId = selectedMachine.data?.machineId;
+    const modelName = selectedMachine.data?.modelName;
+    const command = machineCommandInput.trim();
+
+    if (!machineId || machineId === 'pending') {
+      showNotification('error', 'Machine ID is not available yet');
+      return;
+    }
+
+    if (!modelName) {
+      showNotification('error', 'Missing model name for SSH command');
+      return;
+    }
+
+    if (!command) {
+      showNotification('error', 'Enter a command to run');
+      return;
+    }
+
+    try {
+      isRunningMachineCommand = true;
+      const result = await runMachineCommand(modelName, machineId, command);
+      machineCommandStatus = result?.status_code ?? null;
+    } catch (error) {
+      showNotification('error', error.message || 'Failed to run command');
+    } finally {
+      isRunningMachineCommand = false;
+    }
+  }
 
   async function handleUpdateConfig() {
     if (!selectedNode || isUpdatingConfig) {
@@ -2967,6 +3016,28 @@
               >
                 SSH
               </button>
+              <div class="mt-3 border-t border-gray-200 pt-3">
+                <div class="text-xs font-semibold text-gray-700 mb-2">Run command</div>
+                <input
+                  type="text"
+                  value={machineCommandInput}
+                  oninput={(event) => machineCommandInput = event.target.value}
+                  placeholder="sudo apt update; sudo apt install -y apache2"
+                  class="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  onclick={handleRunMachineCommand}
+                  disabled={isRunningMachineCommand}
+                  class="mt-2 w-full px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded transition-colors disabled:bg-gray-300 disabled:text-gray-500"
+                >
+                  {isRunningMachineCommand ? 'Running…' : 'Run Command'}
+                </button>
+                {#if machineCommandStatus !== null}
+                  <div class="mt-2 text-xs text-gray-600">
+                    Exit status: <span class="font-semibold">{machineCommandStatus}</span>
+                  </div>
+                {/if}
+              </div>
             </div>
           {:else if selectedNode && selectedNode.type === 'charmNode'}
             <div class="details-panel bg-white border-2 border-emerald-500 rounded-lg shadow-lg p-3 min-w-[240px]">

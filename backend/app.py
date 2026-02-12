@@ -507,6 +507,38 @@ def update_application_config(model, application):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/ssh-command', methods=['POST'])
+def run_ssh_command():
+    """
+    Run a command on a Juju machine via juju ssh and return the exit status.
+    """
+    try:
+        data = request.json or {}
+        model = data.get('model')
+        machine_id = data.get('machine_id')
+        command = data.get('command')
+
+        if not model or machine_id is None or not command:
+            return jsonify({'error': 'model, machine_id, and command are required'}), 400
+
+        model = unquote(str(model))
+        machine_id = str(machine_id)
+        command = str(command)
+
+        result = subprocess.run(
+            ['juju', 'ssh', '-m', model, machine_id, command],
+            capture_output=True,
+            text=True
+        )
+
+        return jsonify({
+            'status_code': result.returncode
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/task/<task_id>', methods=['GET'])
 def get_task(task_id):
     """

@@ -269,6 +269,24 @@ export async function addModel(modelName) {
 }
 
 /**
+ * Run a command on a Juju machine via SSH
+ */
+export async function runMachineCommand(model, machineId, command) {
+  const response = await fetch(`${API_BASE}/api/ssh-command`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, machine_id: machineId, command })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to run machine command');
+  }
+
+  return response.json();
+}
+
+/**
  * Health check
  */
 export async function healthCheck() {
