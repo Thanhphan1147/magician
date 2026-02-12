@@ -102,7 +102,8 @@ export async function getModelStatus(model) {
  * Get application config for a model
  */
 export async function getApplicationConfig(model, application) {
-  const encodedModel = encodeURIComponent(model);
+  const normalizedModel = model?.includes('/') ? model.split('/').pop() : model;
+  const encodedModel = encodeURIComponent(normalizedModel);
   const encodedApp = encodeURIComponent(application);
   const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}`);
 
@@ -118,7 +119,8 @@ export async function getApplicationConfig(model, application) {
  * Update application config
  */
 export async function updateApplicationConfig(model, application, config) {
-  const encodedModel = encodeURIComponent(model);
+  const normalizedModel = model?.includes('/') ? model.split('/').pop() : model;
+  const encodedModel = encodeURIComponent(normalizedModel);
   const encodedApp = encodeURIComponent(application);
   const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}`,
     {

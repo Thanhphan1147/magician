@@ -8,6 +8,7 @@ from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 import json
+from urllib.parse import unquote
 from typing import Dict, Any
 import threading
 import subprocess
@@ -415,6 +416,7 @@ def get_status(model):
     Get the status of a Juju model
     """
     try:
+        model = unquote(model)
         # Real status using subprocess
         # Run juju status --format=json --relations
         result = subprocess.run(
@@ -439,11 +441,20 @@ def get_application_config(model, application):
     Get the configuration for a Juju application
     """
     try:
-        result = subprocess.run(
-            ['juju', 'config', '-m', model, application, '--format=json'],
-            capture_output=True,
-            text=True
-        )
+        model = unquote(model)
+        application = unquote(application)
+        def run_config(target_model):
+            return subprocess.run(
+                ['juju', 'config', '-m', target_model, application, '--format=json'],
+                capture_output=True,
+                text=True
+            )
+
+        result = run_config(model)
+
+        if result.returncode != 0 and '/' in model:
+            short_model = model.split('/')[-1]
+            result = run_config(short_model)
 
         if result.returncode != 0:
             return jsonify({'error': result.stderr}), 500
@@ -461,6 +472,8 @@ def update_application_config(model, application):
     Update the configuration for a Juju application
     """
     try:
+        model = unquote(model)
+        application = unquote(application)
         data = request.json or {}
         config_updates = data.get('config', {})
 
@@ -469,11 +482,18 @@ def update_application_config(model, application):
 
         config_args = [f"{key}={value}" for key, value in config_updates.items()]
 
-        result = subprocess.run(
-            ['juju', 'config', '-m', model, application, *config_args],
-            capture_output=True,
-            text=True
-        )
+        def run_update(target_model):
+            return subprocess.run(
+                ['juju', 'config', '-m', target_model, application, *config_args],
+                capture_output=True,
+                text=True
+            )
+
+        result = run_update(model)
+
+        if result.returncode != 0 and '/' in model:
+            short_model = model.split('/')[-1]
+            result = run_update(short_model)
 
         if result.returncode != 0:
             return jsonify({'error': result.stderr}), 500
