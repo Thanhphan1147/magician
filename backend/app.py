@@ -409,7 +409,7 @@ def remove_machine():
     return jsonify({'task_id': task_id}), 202
 
 
-@app.route('/api/status/<model>', methods=['GET'])
+@app.route('/api/status/<path:model>', methods=['GET'])
 def get_status(model):
     """
     Get the status of a Juju model
@@ -433,7 +433,7 @@ def get_status(model):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/config/<model>/<application>', methods=['GET'])
+@app.route('/api/config/<path:model>/<path:application>', methods=['GET'])
 def get_application_config(model, application):
     """
     Get the configuration for a Juju application
@@ -455,7 +455,7 @@ def get_application_config(model, application):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/config/<model>/<application>', methods=['POST'])
+@app.route('/api/config/<path:model>/<path:application>', methods=['POST'])
 def update_application_config(model, application):
     """
     Update the configuration for a Juju application
