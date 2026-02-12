@@ -19,11 +19,9 @@
   let existingApp = $state(data.existingApp || false);
   let appStatus = $state(data.status || '');
   let unitCount = $state(data.units || 0);
-  let desiredUnits = $state(data.desiredUnits || '');
   let autoDeployOnDrop = $state(data.autoDeployOnDrop || false);
   let isRemoving = $state(false);
   let showDeleteConfirm = $state(false);
-  let machineId = $state(data.machineId || '');
 
   // Derived config and constraints strings
   let config = $derived(
@@ -86,7 +84,7 @@
   async function handleDeploy() {
     if (!canDeploy) return;
 
-  const model = data.modelName || data.model || 'default';
+    const model = data.model || 'default';
     
     isDeploying = true;
     deployError = '';
@@ -94,20 +92,13 @@
 
     try {
       // Start deployment
-      const deployOptions = {
+      const { task_id } = await deployCharm(model, charm, {
         channel,
         revision,
         charm_name: charmName,
         config,
-        constraints,
-        machine_id: machineId
-      };
-
-      if (!machineId && desiredUnits !== '' && Number(desiredUnits) > 0) {
-        deployOptions.num_units = Number(desiredUnits);
-      }
-
-      const { task_id } = await deployCharm(model, charm, deployOptions);
+        constraints
+      });
 
       // Poll for completion
       await pollTask(task_id);
@@ -133,7 +124,7 @@
     showDeleteConfirm = false;
   }
 
-  async function handleDelete(force = false) {
+  async function handleDelete() {
     if (!existingApp && !deploySuccess) {
       // If not deployed, just remove the node from canvas
       if (data.onRemoveNode) {
@@ -143,7 +134,7 @@
     }
 
     // If deployed, remove from Juju
-  const model = data.modelName || data.model || 'default';
+    const model = data.model || 'default';
     const appName = charmName || charm;
 
     isRemoving = true;
@@ -151,7 +142,7 @@
     showDeleteConfirm = false;
 
     try {
-  const { task_id } = await removeApplication(model, appName, { force });
+      const { task_id } = await removeApplication(model, appName);
       await pollTask(task_id);
       
       // Remove the node from canvas after successful removal
@@ -401,17 +392,10 @@
           Cancel
         </button>
         <button
-          onclick={() => handleDelete(false)}
+          onclick={handleDelete}
           class="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
         >
           Delete
-        </button>
-        <button
-          onclick={() => handleDelete(true)}
-          class="px-3 py-1 text-xs bg-red-800 hover:bg-red-900 text-white rounded transition-colors"
-          title="Force remove"
-        >
-          Force
         </button>
       </div>
     </div>

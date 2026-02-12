@@ -21,9 +21,7 @@ export async function deployCharm(model, charm, options = {}) {
       revision: options.revision || '',
       charm_name: options.charm_name || '',
       config: options.config || '',
-      constraints: options.constraints || '',
-      machine_id: options.machine_id || '',
-      num_units: options.num_units ?? ''
+      constraints: options.constraints || ''
     })
   });
 
@@ -87,8 +85,7 @@ export async function removeRelation(model, endpointA, endpointB) {
  * Get the status of a Juju model
  */
 export async function getModelStatus(model) {
-  const encodedModel = encodeURIComponent(model);
-  const response = await fetch(`${API_BASE}/api/status/${encodedModel}`);
+  const response = await fetch(`${API_BASE}/api/status/${model}`);
 
   if (!response.ok) {
     const error = await response.json();
@@ -102,9 +99,7 @@ export async function getModelStatus(model) {
  * Get application config for a model
  */
 export async function getApplicationConfig(model, application) {
-  const encodedModel = encodeURIComponent(model);
-  const encodedApp = encodeURIComponent(application);
-  const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}`);
+  const response = await fetch(`${API_BASE}/api/config/${model}/${application}`);
 
   if (!response.ok) {
     const error = await response.json();
@@ -118,9 +113,7 @@ export async function getApplicationConfig(model, application) {
  * Update application config
  */
 export async function updateApplicationConfig(model, application, config) {
-  const encodedModel = encodeURIComponent(model);
-  const encodedApp = encodeURIComponent(application);
-  const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}`,
+  const response = await fetch(`${API_BASE}/api/config/${model}/${application}`,
     {
       method: 'POST',
       headers: {
@@ -189,7 +182,7 @@ export async function pollTask(taskId, interval = 1000, timeout = 60000) {
 /**
  * Remove an application from a Juju model
  */
-export async function removeApplication(model, application, options = {}) {
+export async function removeApplication(model, application) {
   const response = await fetch(`${API_BASE}/api/remove`, {
     method: 'POST',
     headers: {
@@ -197,38 +190,13 @@ export async function removeApplication(model, application, options = {}) {
     },
     body: JSON.stringify({
       model,
-      application,
-      force: options.force === true
+      application
     })
   });
 
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to remove application');
-  }
-
-  return response.json();
-}
-
-/**
- * Remove a machine from a Juju model
- */
-export async function removeMachine(model, machineId, options = {}) {
-  const response = await fetch(`${API_BASE}/api/remove-machine`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      machine_id: machineId,
-      force: options.force === true
-    })
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to remove machine');
   }
 
   return response.json();
@@ -243,24 +211,6 @@ export async function listModels() {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to list models');
-  }
-
-  return response.json();
-}
-
-/**
- * Add a new Juju model
- */
-export async function addModel(modelName) {
-  const response = await fetch(`${API_BASE}/api/models`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model_name: modelName })
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to add model');
   }
 
   return response.json();

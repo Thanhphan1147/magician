@@ -12,4 +12,3 @@ __pycache__/
 # Node.js
 frontend/node_modules/
 frontend/dist/
-tests/node_modules/
