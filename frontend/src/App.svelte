@@ -535,6 +535,20 @@
         )
       );
     }
+
+    if (targetNode && targetNode.type === 'modelFrame') {
+      const safePosition = findAvailableModelPosition(targetNode.position, targetNode.id);
+
+      if (safePosition.x !== targetNode.position.x || safePosition.y !== targetNode.position.y) {
+        nodes.update(ns =>
+          ns.map(n =>
+            n.id === targetNode.id
+              ? { ...n, position: safePosition }
+              : n
+          )
+        );
+      }
+    }
   }
 
   function handleEdgeClick(event) {
@@ -1352,8 +1366,10 @@
 
     // Remove edges for relations that no longer exist
     edges.update(currentEdges => {
-      const nonRelationEdges = currentEdges.filter(edge => edge.type !== 'relationEdge');
-      return applyEdgeGrouping([...nonRelationEdges, ...newRelationEdges]);
+      const preservedEdges = currentEdges.filter(edge =>
+        edge.type !== 'relationEdge' || edge.data?.model !== modelName
+      );
+      return applyEdgeGrouping([...preservedEdges, ...newRelationEdges]);
     });
   }
 
@@ -2272,7 +2288,7 @@
       return;
     }
 
-    const resolvedPosition = findAvailableModelPosition(position);
+  const resolvedPosition = findAvailableModelPosition(position);
     const modelId = `model-${modelIdCounter++}`;
     const newNode = {
       id: modelId,
@@ -2312,8 +2328,8 @@
     };
   }
 
-  function findAvailableModelPosition(initialPosition) {
-    const existingFrames = $nodes.filter(node => node.type === 'modelFrame');
+  function findAvailableModelPosition(initialPosition, excludeId = null) {
+    const existingFrames = $nodes.filter(node => node.type === 'modelFrame' && node.id !== excludeId);
     if (!existingFrames.length) {
       return { x: Math.max(20, initialPosition.x), y: Math.max(20, initialPosition.y) };
     }
