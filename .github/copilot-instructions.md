@@ -2,7 +2,9 @@
 - Everything is done in a multipass VM. Do not make any changes to the host machine.
 - The project is mounted in the VM at `/home/trung.thanh.phan@canonical.com/personal/magician`
 - Assume that there's a multipass VM pre-spawned. Find the name using `multipass list`. Interact with the VM using `multipass exec <VM_NAME> -- <command>`. If there's no VM, ask the project manager to spawn one.
-- node is installed in the multipass VM. It's installed with nvm. Any actions that require node/npm/npx should be executed inside the multipass VM using `multipass exec <VM_NAME> -- <command>`.
+- node is installed in the multipass VM. It's installed with nvm. Any actions that require node/npm/npx should be executed inside the multipass VM using `multipass exec <VM_NAME> -- <command>`. Install nvm following the official guide for ubuntu if nvm is not installed.
+- ALWAYS rebuild, restart the service and test the service after every change.
+- Rebuilds must be done inside the multipass VM.
 - Rebuild and refresh the systemd service after every change:
 ```bash
 # Build frontend

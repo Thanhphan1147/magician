@@ -825,7 +825,10 @@
   }
 
   function handleViewModeChange(modelId, viewMode) {
-    const resolvedView = viewMode === 'machine' ? 'machine' : 'app';
+    const modelFrame = $nodes.find(node => node.id === modelId);
+    const modelType = (modelFrame?.data?.modelType || '').toString().toLowerCase();
+    const isK8sModel = modelType === 'caas' || modelType === 'k8s' || modelType === 'kubernetes';
+    const resolvedView = !isK8sModel && viewMode === 'machine' ? 'machine' : 'app';
 
     nodes.update(currentNodes =>
       currentNodes.map(node => {
@@ -870,8 +873,50 @@
   function handleModelRefresh(modelId, status) {
     const modelFrame = $nodes.find(n => n.id === modelId);
     const modelName = modelFrame?.data?.modelName || 'default';
-    const viewMode = modelFrame?.data?.viewMode || 'app';
-    const isMachineView = viewMode === 'machine';
+    const rawModelType = status?.model_type || status?.model?.type || status?.model?.['model-type'] || status?.model?.model_type || '';
+    const modelType = rawModelType ? String(rawModelType).toLowerCase() : '';
+    const isK8sModel = modelType === 'caas' || modelType === 'k8s' || modelType === 'kubernetes';
+    const viewMode = isK8sModel ? 'app' : (modelFrame?.data?.viewMode || 'app');
+    const isMachineView = !isK8sModel && viewMode === 'machine';
+
+    nodes.update(currentNodes =>
+      currentNodes.map(node => {
+        if (node.id === modelId) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              modelType,
+              viewMode
+            }
+          };
+        }
+        const parentId = node.parentId ?? node.parentNode;
+        if (parentId === modelId) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              modelType,
+              modelName,
+              modelType,
+            }
+          };
+        }
+        return node;
+      })
+    );
+
+    if (isK8sModel) {
+      nodes.update(currentNodes =>
+        currentNodes.filter(node => !(node.type === 'machineNode' && (node.parentId ?? node.parentNode) === modelId))
+      );
+      pendingMachineDeploys = pendingMachineDeploys.filter(entry => entry.modelId !== modelId);
+      if (selectedMachineGroups?.[modelName]) {
+        const { [modelName]: _removed, ...rest } = selectedMachineGroups;
+        selectedMachineGroups = rest;
+      }
+    }
 
     if (isMachineView) {
       nodes.update(currentNodes =>
@@ -1018,6 +1063,11 @@
           appData?.['charm-config'] ||
           appData?.['config'] ||
           null;
+        const statusMessage =
+          appData?.['application-status']?.message ||
+          appData?.status?.message ||
+          appData?.['status-message'] ||
+          '';
 
         // Check if a node for this app already exists
         const existingNode = $nodes.find(n => 
@@ -1038,11 +1088,13 @@
               charm: appData['charm-name'] || appData.charm || appName,
               channel: appData['charm-channel'] || '',
               modelName: modelName,
+              modelType,
               onDeploySuccess: handleDeploySuccess,
               onRemoveNode: handleRemoveNode,
               // Populate with actual deployment data
               existingApp: true,
               status: appData['application-status']?.current || 'unknown',
+              statusMessage,
               units: appData.units ? Object.keys(appData.units).length : 0,
               config: appConfig
             },
@@ -1065,10 +1117,12 @@
                   ...node.data,
                   existingApp: true,
                   status: appData['application-status']?.current || 'unknown',
+                  statusMessage,
                   units: appData.units ? Object.keys(appData.units).length : 0,
                   charm: appData['charm-name'] || appData.charm || appName,
                   channel: appData['charm-channel'] || '',
-                  config: appConfig
+                  config: appConfig,
+                  modelType
                 },
                 hidden: viewMode !== 'app'
               };
@@ -1079,7 +1133,7 @@
       });
     }
 
-    if (status?.applications || status?.machines) {
+  if (!isK8sModel && (status?.applications || status?.machines)) {
   const machineUnits = new Map();
   const machineInfoMap = new Map();
 
@@ -1198,6 +1252,7 @@
               pendingUnits,
               machineInfo: machineInfoMap.get(machineId) || node.data?.machineInfo,
               modelName,
+              modelType,
               isSelected: getSelectedMachineGroup(modelName).includes(machineId),
               onToggleSelect: toggleMachineSelection,
               onRemoveMachine: handleRemoveMachine
@@ -1223,6 +1278,7 @@
               pendingUnits: getPendingUnitsForMachine(modelId, machineId),
               machineInfo: machineInfoMap.get(machineId),
               modelName,
+              modelType,
               isSelected: getSelectedMachineGroup(modelName).includes(machineId),
               onToggleSelect: toggleMachineSelection,
               onRemoveMachine: handleRemoveMachine
@@ -1257,6 +1313,7 @@
                 message: ''
               },
               modelName,
+              modelType,
               isSelected: false,
               onToggleSelect: toggleMachineSelection,
               onRemoveMachine: handleRemoveMachine
@@ -1292,6 +1349,9 @@
             
             relationList.forEach(relation => {
               const relatedApp = relation['related-application'];
+              if (!relatedApp || relatedApp === appName) {
+                return;
+              }
               const relatedEndpoint = relation['related-endpoint'] || getRelatedEndpoint(status, appName, relatedApp, relation.interface);
               const resolvedRelatedEndpoint = relatedEndpoint === 'unknown' ? relation.interface : relatedEndpoint;
               const endpoints = [
@@ -1600,7 +1660,7 @@
         ? template.constraintPairs.map(pair => ({ ...pair }))
         : [{ key: '', value: '' }]
     };
-
+true
     savedCharmTemplates = [...savedCharmTemplates, savedTemplate];
     showNotification('success', `Saved template for ${template.charm}`);
   }
@@ -1863,6 +1923,7 @@
         const modelFrame = currentNodes.find(node => node.id === modelId);
         const viewMode = modelFrame?.data?.viewMode || 'app';
         const modelName = modelFrame?.data?.modelName || '';
+        const modelType = modelFrame?.data?.modelType || '';
         return [
           ...currentNodes,
           {
@@ -1875,6 +1936,7 @@
               pendingUnits: [label],
               isTemporary: true,
               modelName,
+              modelType,
               isSelected: false,
               onToggleSelect: toggleMachineSelection,
               onRemoveMachine: handleRemoveMachine,
@@ -1933,8 +1995,14 @@
 
   async function handleMachineViewDeploy({ modelFrame, charmTemplate, machineTarget, position }) {
     const modelName = modelFrame.data?.modelName;
+    const modelType = (modelFrame.data?.modelType || '').toString().toLowerCase();
+    const isK8sModel = modelType === 'caas' || modelType === 'k8s' || modelType === 'kubernetes';
     if (!modelName) {
       showNotification('error', 'Model name is missing for this deploy');
+      return;
+    }
+    if (isK8sModel) {
+      showNotification('error', 'Kubernetes models do not support machine view deployments');
       return;
     }
     const { configStr, constraintsStr } = buildConfigAndConstraints(charmTemplate);
@@ -2061,8 +2129,8 @@
 
     if (!draggedCharmTemplate) return;
 
-    const charmTemplate = draggedCharmTemplate;
-    const machineTarget = findMachineNodeAtPoint(event.clientX, event.clientY);
+  const charmTemplate = draggedCharmTemplate;
+  let machineTarget = findMachineNodeAtPoint(event.clientX, event.clientY);
     
     // Get drop position on the canvas
     const canvasRect = event.currentTarget.getBoundingClientRect();
@@ -2102,7 +2170,14 @@
     const relativeY = event.clientY - frameRect.top;
 
     const { configStr, constraintsStr } = buildConfigAndConstraints(charmTemplate);
-    const isMachineView = modelFrame.data?.viewMode === 'machine';
+    const modelType = (modelFrame.data?.modelType || '').toString().toLowerCase();
+    const isK8sModel = modelType === 'caas' || modelType === 'k8s' || modelType === 'kubernetes';
+    const isMachineView = !isK8sModel && modelFrame.data?.viewMode === 'machine';
+
+    if (isK8sModel && machineTarget) {
+      showNotification('error', 'Kubernetes models do not support machine placement');
+      machineTarget = null;
+    }
 
     if (isMachineView) {
       await handleMachineViewDeploy({
@@ -2136,6 +2211,7 @@
           constraints: constraintsStr,
           model: modelFrame.data.modelName,
           modelName: modelFrame.data.modelName,
+          modelType,
           onDeploySuccess: handleDeploySuccess,
           onRemoveNode: handleRemoveNode,
           autoDeployOnDrop: true,
@@ -2172,8 +2248,9 @@
         charmName: charmTemplate.charmName || charmTemplate.charm,
         config: configStr,
         constraints: constraintsStr,
-        model: modelFrame.data.modelName,
-        modelName: modelFrame.data.modelName,
+  model: modelFrame.data.modelName,
+  modelName: modelFrame.data.modelName,
+  modelType,
         onDeploySuccess: handleDeploySuccess,
         onRemoveNode: handleRemoveNode,
         autoDeployOnDrop: true, // Signal to auto-deploy
@@ -2214,8 +2291,10 @@
     
     if (!draggedCharmTemplate) return;
 
-    const charmTemplate = draggedCharmTemplate;
-    const isMachineView = modelFrame.data?.viewMode === 'machine';
+  const charmTemplate = draggedCharmTemplate;
+  const modelType = (modelFrame.data?.modelType || '').toString().toLowerCase();
+  const isK8sModel = modelType === 'caas' || modelType === 'k8s' || modelType === 'kubernetes';
+  const isMachineView = !isK8sModel && modelFrame.data?.viewMode === 'machine';
     
     // Get the drop position relative to the model frame
     const modelFrameElement = event.currentTarget;
@@ -2252,8 +2331,9 @@
         channel: charmTemplate.channel,
         revision: charmTemplate.revision,
         charmName: charmTemplate.charmName || charmTemplate.charm,
-        model: modelFrame.data.modelName,
-        modelName: modelFrame.data.modelName,
+  model: modelFrame.data.modelName,
+  modelName: modelFrame.data.modelName,
+  modelType,
         config: configStr,
         constraints: constraintsStr,
         onDeploySuccess: handleDeploySuccess,
@@ -2296,6 +2376,7 @@
       position: resolvedPosition,
       data: { 
         modelName,
+        modelType: '',
         onRefreshSuccess: handleModelRefresh,
         onViewModeChange: handleViewModeChange,
         onClose: handleRemoveModelFrame,

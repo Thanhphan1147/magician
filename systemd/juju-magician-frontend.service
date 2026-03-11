@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-Environment=HOME=/home/ubuntu
-Environment=NVM_DIR=/home/ubuntu/.nvm
+Environment=HOME=/home/trung.thanh.phan@canonical.com
+Environment=NVM_DIR=/home/trung.thanh.phan@canonical.com/.nvm
 WorkingDirectory=/home/trung.thanh.phan@canonical.com/personal/magician/frontend
 ExecStart=/bin/bash -lc "source \"$NVM_DIR/nvm.sh\" && nvm use --silent default && npm run dev"
 Restart=always

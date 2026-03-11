@@ -429,6 +429,13 @@ def get_status(model):
             return jsonify({'error': result.stderr}), 500
         
         status_data = json.loads(result.stdout)
+        model_info = status_data.get('model') or {}
+        status_data['model_type'] = (
+            model_info.get('type')
+            or model_info.get('model-type')
+            or model_info.get('model_type')
+            or ''
+        )
         return jsonify(status_data), 200
         
     except Exception as e:

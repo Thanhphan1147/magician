@@ -18,6 +18,7 @@
   let deploySuccess = $state(false);
   let existingApp = $state(data.existingApp || false);
   let appStatus = $state(data.status || '');
+  let statusMessage = $state(data.statusMessage || '');
   let unitCount = $state(data.units || 0);
   let desiredUnits = $state(data.desiredUnits || '');
   let autoDeployOnDrop = $state(data.autoDeployOnDrop || false);
@@ -53,6 +54,14 @@
     deploySuccess ? 'bg-green-500' :
     'bg-purple-500'
   );
+
+  $effect(() => {
+    existingApp = data?.existingApp ?? existingApp;
+    appStatus = data?.status ?? appStatus;
+    statusMessage = data?.statusMessage ?? statusMessage;
+    unitCount = data?.units ?? unitCount;
+    channel = data?.channel ?? channel;
+  });
 
   // Auto-deploy on mount if flag is set
   onMount(() => {
@@ -202,6 +211,9 @@
     {#if existingApp}
       <div class="mt-2 text-xs text-blue-700 space-y-0.5">
         <div>Status: <span class="font-medium">{appStatus}</span></div>
+        {#if statusMessage}
+          <div class="text-[11px] text-blue-600">{statusMessage}</div>
+        {/if}
         <div>Units: <span class="font-medium">{unitCount}</span></div>
         {#if channel}
           <div>Channel: <span class="font-medium">{channel}</span></div>
