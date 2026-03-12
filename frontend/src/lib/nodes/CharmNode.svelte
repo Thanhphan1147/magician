@@ -56,6 +56,8 @@
   );
 
   $effect(() => {
+    charm = data?.charm ?? charm;
+    charmName = data?.charmName ?? charmName;
     existingApp = data?.existingApp ?? existingApp;
     appStatus = data?.status ?? appStatus;
     statusMessage = data?.statusMessage ?? statusMessage;
@@ -178,9 +180,14 @@
   <!-- Node Header -->
   <div class="mb-3">
     <div class="flex items-center justify-between">
-      <h3 class="text-lg font-semibold text-gray-800">
-        {charmName || charm || 'New Charm'}
-      </h3>
+      <div>
+        <h3 class="text-lg font-semibold text-gray-800">
+          {charmName || charm || 'New Charm'}
+        </h3>
+        {#if charm && charmName && charmName !== charm}
+          <div class="text-xs text-gray-500">Charm: {charm}</div>
+        {/if}
+      </div>
       <div class="flex items-center gap-2">
         {#if existingApp}
           <span class="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded">

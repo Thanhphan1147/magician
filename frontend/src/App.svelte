@@ -6,7 +6,7 @@
   import ModelFrame from './lib/nodes/ModelFrame.svelte';
   import MachineNode from './lib/nodes/MachineNode.svelte';
   import RelationEdge from './lib/edges/RelationEdge.svelte';
-  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig, deployCharm, removeMachine, listModels, addModel, runMachineCommand } from './lib/api.js';
+  import { createRelation, removeRelation, pollTask, getModelStatus, getApplicationConfig, updateApplicationConfig, resetApplicationConfig, getApplicationTrust, updateApplicationTrust, deployCharm, removeMachine, listModels, addModel, runMachineCommand } from './lib/api.js';
   import '@xyflow/svelte/dist/style.css';
 
   // Define custom node and edge types
@@ -44,6 +44,13 @@
   let showFullConfig = $state(false);
   let configEdits = $state({});
   let isUpdatingConfig = $state(false);
+  let trustValue = $state('');
+  let trustInput = $state('');
+  let trustLoadError = $state('');
+  let isUpdatingTrust = $state(false);
+  let showConfigResetPrompt = $state(false);
+  let wipedConfigKeys = $state([]);
+  let pendingConfigUpdates = $state({});
   let machineCommandInput = $state('');
   let machineCommandStatus = $state(null);
   let isRunningMachineCommand = $state(false);
@@ -270,10 +277,17 @@
   let isConfigDirty = $derived(
     selectedAppConfigAll.some(entry => (configEdits?.[entry.key] ?? entry.value) !== entry.value)
   );
+  let isTrustDirty = $derived((trustInput ?? '') !== (trustValue ?? ''));
 
   $effect(() => {
     if (!selectedNode) {
       configEdits = {};
+      trustValue = '';
+      trustInput = '';
+      trustLoadError = '';
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
       return;
     }
 
@@ -344,14 +358,25 @@
     }
 
     const updates = {};
+    const wipedKeys = [];
     selectedAppConfigAll.forEach(entry => {
       const newValue = configEdits?.[entry.key];
       if (newValue !== undefined && newValue !== entry.value) {
         updates[entry.key] = newValue;
+        if ((newValue === '' || newValue === null) && entry.value !== '' && entry.value !== null && entry.value !== undefined) {
+          wipedKeys.push(entry.key);
+        }
       }
     });
 
     if (Object.keys(updates).length === 0) {
+      return;
+    }
+
+    if (wipedKeys.length > 0 && !showConfigResetPrompt) {
+      wipedConfigKeys = wipedKeys;
+      pendingConfigUpdates = updates;
+      showConfigResetPrompt = true;
       return;
     }
 
@@ -380,6 +405,123 @@
       showNotification('error', `Failed to update config: ${error.message}`);
     } finally {
       isUpdatingConfig = false;
+    }
+  }
+
+  async function applyConfigUpdateWithReset(resetWipedKeys) {
+    if (!selectedNode || isUpdatingConfig) {
+      return;
+    }
+
+    const modelName = selectedNode.data?.modelName;
+    const appName = selectedNode.data?.charmName;
+
+    if (!modelName || !appName) {
+      showNotification('error', 'Missing model or application name');
+      return;
+    }
+
+    const updates = { ...pendingConfigUpdates };
+    const resetKeys = resetWipedKeys ? [...wipedConfigKeys] : [];
+
+    if (resetKeys.length > 0) {
+      resetKeys.forEach(key => {
+        delete updates[key];
+      });
+    }
+
+    if (Object.keys(updates).length === 0 && resetKeys.length === 0) {
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
+      return;
+    }
+
+    try {
+      isUpdatingConfig = true;
+
+      if (Object.keys(updates).length > 0) {
+        await updateApplicationConfig(modelName, appName, updates);
+      }
+      if (resetKeys.length > 0) {
+        await resetApplicationConfig(modelName, appName, resetKeys);
+      }
+
+      const refreshedConfig = await getApplicationConfig(modelName, appName);
+      nodes.update(currentNodes =>
+        currentNodes.map(node =>
+          node.id === selectedNode.id
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  config: refreshedConfig
+                }
+              }
+            : node
+        )
+      );
+
+      showNotification('success', `Config updated for ${appName}`);
+    } catch (error) {
+      console.error('Failed to update application config:', error);
+      showNotification('error', `Failed to update config: ${error.message}`);
+    } finally {
+      isUpdatingConfig = false;
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
+    }
+  }
+
+  async function loadTrustConfig(modelName, appName) {
+    trustLoadError = '';
+    if (!modelName || !appName) {
+      trustValue = '';
+      trustInput = '';
+      return;
+    }
+
+    try {
+      const result = await getApplicationTrust(modelName, appName);
+      trustValue = result?.trust ?? '';
+      trustInput = trustValue;
+    } catch (error) {
+      trustLoadError = error.message || 'Failed to load trust config';
+      trustValue = '';
+      trustInput = '';
+    }
+  }
+
+  async function handleUpdateTrust() {
+    if (!selectedNode || isUpdatingTrust) {
+      return;
+    }
+
+    const modelName = selectedNode.data?.modelName;
+    const appName = selectedNode.data?.charmName;
+    const nextValue = (trustInput ?? '').toString().trim().toLowerCase();
+
+    if (!modelName || !appName) {
+      showNotification('error', 'Missing model or application name');
+      return;
+    }
+
+    if (!['true', 'false'].includes(nextValue)) {
+      showNotification('error', 'Trust must be true or false');
+      return;
+    }
+
+    try {
+      isUpdatingTrust = true;
+      const result = await updateApplicationTrust(modelName, appName, nextValue);
+      trustValue = result?.trust ?? nextValue;
+      trustInput = trustValue;
+      showNotification('success', `Updated trust for ${appName}`);
+    } catch (error) {
+      showNotification('error', error.message || 'Failed to update trust');
+    } finally {
+      isUpdatingTrust = false;
     }
   }
 
@@ -590,7 +732,10 @@
       selectedNodeId = node.id;
       selectedEdgeId = null;
       showFullConfig = false;
-  configEdits = {};
+      configEdits = {};
+      trustValue = '';
+      trustInput = '';
+      trustLoadError = '';
 
       nodes.update(currentNodes =>
         currentNodes.map(n => ({
@@ -626,6 +771,8 @@
           } catch (error) {
             console.error('Failed to fetch application config:', error);
           }
+
+          await loadTrustConfig(modelName, appName);
         }
       }
     }
@@ -647,16 +794,34 @@
       selectedNodeId = null;
       showFullConfig = false;
       configEdits = {};
+      trustValue = '';
+      trustInput = '';
+      trustLoadError = '';
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
     } else if (selectedNodeIds.size > 0) {
       selectedNodeId = selectedNodeIds.values().next().value;
       selectedEdgeId = null;
       showFullConfig = false;
       configEdits = {};
+      trustValue = '';
+      trustInput = '';
+      trustLoadError = '';
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
     } else {
       selectedEdgeId = null;
       selectedNodeId = null;
       showFullConfig = false;
       configEdits = {};
+      trustValue = '';
+      trustInput = '';
+      trustLoadError = '';
+      showConfigResetPrompt = false;
+      wipedConfigKeys = [];
+      pendingConfigUpdates = {};
     }
 
 
@@ -704,7 +869,16 @@
       selectedEdgeId = null;
       selectedNodeId = null;
       showFullConfig = false;
-  configEdits = {};
+    configEdits = {};
+  trustValue = '';
+  trustInput = '';
+  trustLoadError = '';
+  showConfigResetPrompt = false;
+  wipedConfigKeys = [];
+  pendingConfigUpdates = {};
+    trustValue = '';
+    trustInput = '';
+    trustLoadError = '';
       edges.update(currentEdges =>
         currentEdges.map(edge => ({
           ...edge,
@@ -3141,6 +3315,29 @@ true
               <div class="text-xs font-semibold text-gray-700 mb-2">Application Config</div>
               <div class="text-xs text-gray-500 mb-3">{selectedNode.data?.charmName || 'Application'}</div>
 
+              <div class="mb-3 text-xs text-gray-600">
+                <div class="font-medium text-gray-700">Trust</div>
+                <div class="mt-1 flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={trustInput}
+                    oninput={(event) => trustInput = event.target.value}
+                    placeholder="true/false"
+                    class="flex-1 px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                  <button
+                    onclick={handleUpdateTrust}
+                    disabled={isUpdatingTrust || !isTrustDirty}
+                    class="px-3 py-1 text-xs font-semibold rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:bg-gray-300 disabled:text-gray-500"
+                  >
+                    {isUpdatingTrust ? 'Updating...' : 'Update'}
+                  </button>
+                </div>
+                {#if trustLoadError}
+                  <div class="mt-1 text-xs text-red-600">{trustLoadError}</div>
+                {/if}
+              </div>
+
               {#if selectedAppConfigSet.length > 0}
                 <div class="space-y-1 text-xs text-gray-600 mb-3">
                   {#each selectedAppConfigSet as entry}
@@ -3174,6 +3371,41 @@ true
                     {showFullConfig ? 'Hide full config options' : 'Show all configs'}
                   {/if}
                 </button>
+
+                {#if showConfigResetPrompt}
+                  <div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                    <div class="font-semibold mb-1">Confirm wiped config values</div>
+                    <div class="mb-2">
+                      You cleared {wipedConfigKeys.length} config value{wipedConfigKeys.length === 1 ? '' : 's'}:
+                      <span class="font-medium">{wipedConfigKeys.join(', ')}</span>.
+                    </div>
+                    <div class="mb-2">Choose whether to set them to an empty string or reset them to none.</div>
+                    <div class="flex gap-2">
+                      <button
+                        onclick={() => applyConfigUpdateWithReset(false)}
+                        class="flex-1 rounded bg-emerald-600 px-2 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
+                      >
+                        Set empty
+                      </button>
+                      <button
+                        onclick={() => applyConfigUpdateWithReset(true)}
+                        class="flex-1 rounded bg-slate-600 px-2 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+                      >
+                        Reset to none
+                      </button>
+                    </div>
+                    <button
+                      onclick={() => {
+                        showConfigResetPrompt = false;
+                        wipedConfigKeys = [];
+                        pendingConfigUpdates = {};
+                      }}
+                      class="mt-2 w-full rounded border border-amber-400 px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                {/if}
 
                 {#if showFullConfig}
                   <div class="mt-3 space-y-2 text-xs text-gray-600 max-h-40 overflow-y-auto">

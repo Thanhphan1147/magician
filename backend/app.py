@@ -514,6 +514,134 @@ def update_application_config(model, application):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/config/<path:model>/<path:application>/reset', methods=['POST'])
+def reset_application_config(model, application):
+    """
+    Reset the configuration keys for a Juju application
+    """
+    try:
+        model = unquote(model)
+        application = unquote(application)
+        data = request.json or {}
+        keys = data.get('keys', [])
+
+        if not keys or not isinstance(keys, list):
+            return jsonify({'error': 'config keys are required'}), 400
+
+        reset_arg = ','.join(str(key) for key in keys if str(key).strip())
+        if not reset_arg:
+            return jsonify({'error': 'config keys are required'}), 400
+
+        def run_reset(target_model):
+            return subprocess.run(
+                ['juju', 'config', '-m', target_model, application, '--reset', reset_arg],
+                capture_output=True,
+                text=True
+            )
+
+        result = run_reset(model)
+
+        if result.returncode != 0 and '/' in model:
+            short_model = model.split('/')[-1]
+            result = run_reset(short_model)
+
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr}), 500
+
+        return jsonify({
+            'success': True,
+            'message': f'Reset config for {application}',
+            'keys': keys
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/<path:model>/<path:application>/trust', methods=['GET'])
+def get_application_trust(model, application):
+    """
+    Get the trust configuration value for a Juju application
+    """
+    try:
+        model = unquote(model)
+        application = unquote(application)
+
+        def run_trust(target_model):
+            return subprocess.run(
+                ['juju', 'config', '-m', target_model, application, 'trust'],
+                capture_output=True,
+                text=True
+            )
+
+        result = run_trust(model)
+
+        if result.returncode != 0 and '/' in model:
+            short_model = model.split('/')[-1]
+            result = run_trust(short_model)
+
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr}), 500
+
+        output = (result.stdout or '').strip()
+        trust_value = output
+        if ':' in output:
+            lines = [line.strip() for line in output.splitlines() if line.strip()]
+            trust_lines = [line for line in lines if line.lower().startswith('trust')]
+            if trust_lines:
+                _, trust_value = trust_lines[-1].split(':', 1)
+                trust_value = trust_value.strip()
+
+        return jsonify({'trust': trust_value}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/<path:model>/<path:application>/trust', methods=['POST'])
+def update_application_trust(model, application):
+    """
+    Update the trust configuration value for a Juju application
+    """
+    try:
+        model = unquote(model)
+        application = unquote(application)
+        data = request.json or {}
+        trust_value = data.get('trust')
+
+        if trust_value is None or trust_value == '':
+            return jsonify({'error': 'trust value is required'}), 400
+
+        trust_str = str(trust_value).strip().lower()
+        if trust_str not in ('true', 'false'):
+            return jsonify({'error': 'trust must be true or false'}), 400
+
+        def run_update(target_model):
+            return subprocess.run(
+                ['juju', 'config', '-m', target_model, application, f'trust={trust_str}'],
+                capture_output=True,
+                text=True
+            )
+
+        result = run_update(model)
+
+        if result.returncode != 0 and '/' in model:
+            short_model = model.split('/')[-1]
+            result = run_update(short_model)
+
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr}), 500
+
+        return jsonify({
+            'success': True,
+            'message': f'Updated trust for {application}',
+            'trust': trust_str
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/ssh-command', methods=['POST'])
 def run_ssh_command():
     """

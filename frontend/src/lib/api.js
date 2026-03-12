@@ -141,6 +141,69 @@ export async function updateApplicationConfig(model, application, config) {
 }
 
 /**
+ * Reset application config keys
+ */
+export async function resetApplicationConfig(model, application, keys = []) {
+  const normalizedModel = model?.includes('/') ? model.split('/').pop() : model;
+  const encodedModel = encodeURIComponent(normalizedModel);
+  const encodedApp = encodeURIComponent(application);
+  const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}/reset`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ keys })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to reset application config');
+  }
+
+  return response.json();
+}
+
+/**
+ * Get application trust config value
+ */
+export async function getApplicationTrust(model, application) {
+  const normalizedModel = model?.includes('/') ? model.split('/').pop() : model;
+  const encodedModel = encodeURIComponent(normalizedModel);
+  const encodedApp = encodeURIComponent(application);
+  const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}/trust`);
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to get trust config');
+  }
+
+  return response.json();
+}
+
+/**
+ * Update application trust config value
+ */
+export async function updateApplicationTrust(model, application, trustValue) {
+  const normalizedModel = model?.includes('/') ? model.split('/').pop() : model;
+  const encodedModel = encodeURIComponent(normalizedModel);
+  const encodedApp = encodeURIComponent(application);
+  const response = await fetch(`${API_BASE}/api/config/${encodedModel}/${encodedApp}/trust`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ trust: trustValue })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to update trust config');
+  }
+
+  return response.json();
+}
+
+/**
  * Get the status of a background task
  */
 export async function getTaskStatus(taskId) {
