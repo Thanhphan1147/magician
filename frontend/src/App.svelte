@@ -93,6 +93,13 @@
     } finally {
       isLoadingModels = false;
     }
+
+    // Check URL for model name to auto-open on canvas
+    const path = window.location.pathname;
+    const modelNameFromUrl = path.startsWith('/') ? path.slice(1) : path;
+    if (modelNameFromUrl) {
+      addModelFrame(decodeURIComponent(modelNameFromUrl));
+    }
   });
 
   function handleModelDragStart(event, model) {
@@ -2819,7 +2826,7 @@ true
   {#if showSidebar}
     <div class="sidebar w-64 bg-gray-800 text-white p-4 flex flex-col space-y-4">
       <div class="sidebar-header">
-        <h1 class="text-2xl font-bold mb-2">Magician</h1>
+        <h1 class="text-2xl font-bold mb-2">Dashboard</h1>
       </div>
 
       <div class="divider border-t border-gray-600"></div>

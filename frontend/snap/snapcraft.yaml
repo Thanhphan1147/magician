@@ -1,0 +1,49 @@
+name: magician-frontend
+version: '0.1.0'
+summary: Svelte frontend for Magician.
+description: |
+  A Svelte-based web UI for deploying and managing Juju models.
+  Proxies /api requests to the Flask backend at http://localhost:5000
+  via the built-in Vite preview server.
+
+base: core24
+grade: devel
+confinement: strict
+
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+
+apps:
+  magician-frontend:
+    command: bin/start.sh
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+
+parts:
+  frontend:
+    plugin: npm
+    source: .
+    npm-node-version: "20.18.1"
+    npm-include-node: true
+    override-build: |
+      export PATH="$PWD/node_modules/.bin:$PATH"
+      npm install --include=dev
+      npm run build
+      # Let the npm plugin stage node and node_modules
+      craftctl default
+      # Copy the built frontend into the snap
+      mkdir -p $CRAFT_PART_INSTALL/frontend
+      cp -r dist $CRAFT_PART_INSTALL/frontend/
+      cp -r node_modules $CRAFT_PART_INSTALL/frontend/
+      cp vite.config.js $CRAFT_PART_INSTALL/frontend/
+      cp package.json $CRAFT_PART_INSTALL/frontend/
+
+  launcher:
+    plugin: dump
+    source: snap/local/
+    organize:
+      start.sh: bin/start.sh
