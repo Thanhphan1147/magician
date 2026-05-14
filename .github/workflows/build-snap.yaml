@@ -1,0 +1,45 @@
+name: Build Snap
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-snap:
+    name: Build Snap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Snap
+        id: snapcraft
+        uses: snapcore/action-build@v1
+      - name: Install and verify
+        run: |
+          sudo snap install --dangerous --classic ${{ steps.snapcraft.outputs.snap }}
+          sudo snap set magician backend.user=root
+
+          snap_services_output="$(sudo snap services magician)"
+          echo "$snap_services_output"
+
+          sleep 5
+
+          backend_status="$(echo "$snap_services_output" | awk '$1=="magician.backend" {print $3}')"
+          frontend_status="$(echo "$snap_services_output" | awk '$1=="magician.frontend" {print $3}')"
+
+          if [ "$backend_status" != "active" ]; then
+            echo "Expected magician.backend to be active, got: ${backend_status:-<missing>}"
+            sudo snap logs magician.backend -n 30
+            exit 1
+          fi
+
+          if [ "$frontend_status" != "active" ]; then
+            echo "Expected magician.frontend to be active, got: ${frontend_status:-<missing>}"
+            sudo snap logs magician.frontend -n 30
+            exit 1
+          fi
+      - name: Upload Snap Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magician-snap
+          path: ${{ steps.snapcraft.outputs.snap }}

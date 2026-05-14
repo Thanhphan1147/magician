@@ -1,5 +1,7 @@
 # Juju Magician - Infrastructure Management GUI
 
+[![Build Snap](https://github.com/Thanhphan1147/magician/actions/workflows/build-snap.yaml/badge.svg)](https://github.com/Thanhphan1147/magician/actions/workflows/build-snap.yaml)
+
 A modern web application for visualizing and managing Juju infrastructure. Built with Svelte 5 and Flask, packaged as a single classic snap.
 
 ## Screenshots
