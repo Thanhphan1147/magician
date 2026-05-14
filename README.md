@@ -2,6 +2,9 @@
 
 A modern web application for visualizing and managing Juju infrastructure. Built with Svelte 5 and Flask, packaged as a single classic snap.
 
+## Screenshots
+![Dashboard](docs/images/dashboard.png)
+
 ## Project Structure
 
 ```
