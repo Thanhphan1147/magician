@@ -1,5 +1,5 @@
 name: magician
-version: '0.1.0'
+version: "0.1.0"
 summary: Juju model management UI with Flask backend and Svelte frontend.
 description: |
   Magician is a web-based tool for deploying and managing Juju models.
@@ -11,9 +11,7 @@ grade: devel
 confinement: classic
 
 platforms:
-  amd64:
-    build-on: [amd64]
-    build-for: [amd64]
+  ubuntu@24.04:amd64:
 
 apps:
   backend:
