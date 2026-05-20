@@ -7,3 +7,6 @@ BACKEND_USER="$(snapctl get backend.user)"
 if [ -z "$BACKEND_USER" ]; then
     snapctl set backend.user=ubuntu
 fi
+
+# Restart backend service to pick up the new user
+snapctl restart magician.backend
